@@ -19,14 +19,13 @@ const SYMBOLS: Record<string, string> = {
   "PLNUSD=X": "PLN",
 };
 
-const YAHOO_URL =
-  "https://query1.finance.yahoo.com/v8/finance/quote?symbols=" +
-  Object.keys(SYMBOLS).join(",");
+const yahooUrl = new URL("https://query1.finance.yahoo.com/v8/finance/quote");
+yahooUrl.searchParams.set("symbols", Object.keys(SYMBOLS).join(","));
 
 Deno.serve(async () => {
   try {
     // 1. Pobierz kursy z Yahoo Finance
-    const res = await fetch(YAHOO_URL, {
+    const res = await fetch(yahooUrl.toString(), {
       headers: { "User-Agent": "Mozilla/5.0" },
     });
 
