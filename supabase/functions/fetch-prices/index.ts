@@ -1,74 +1,64 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
-// Mapowanie: Yahoo symbol → nasz asset_id w price_cache
+// Mapowanie: Twelve Data symbol → nasz asset_id w price_cache
 const SYMBOLS: Record<string, string> = {
   // Krypto
-  "BTC-USD": "BTC",
-  "ETH-USD": "ETH",
-  "SOL-USD": "SOL",
-  // Złoto i srebro (futures)
-  "GC=F": "XAU",
-  "SI=F": "XAG",
-  // Waluty (cena w USD)
-  "EURUSD=X": "EUR",
-  "GBPUSD=X": "GBP",
-  "JPYUSD=X": "JPY",
-  "CNHUSD=X": "CNH",
-  "CHFUSD=X": "CHF",
-  "CADUSD=X": "CAD",
-  "PLNUSD=X": "PLN",
+  "BTC/USD": "BTC",
+  "ETH/USD": "ETH",
+  "SOL/USD": "SOL",
+  // Złoto i srebro
+  "XAU/USD": "XAU",
+  "XAG/USD": "XAG",
+  // Waluty (cena 1 jednostki w USD)
+  "EUR/USD": "EUR",
+  "GBP/USD": "GBP",
+  "JPY/USD": "JPY",
+  "CNH/USD": "CNH",
+  "CHF/USD": "CHF",
+  "CAD/USD": "CAD",
+  "PLN/USD": "PLN",
+  // Popularne akcje
+  "AAPL": "AAPL",
+  "MSFT": "MSFT",
+  "GOOGL": "GOOGL",
+  "AMZN": "AMZN",
+  "TSLA": "TSLA",
+  "NVDA": "NVDA",
 };
-
-const HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "Accept": "*/*",
-};
-
-async function getYahooCrumb(): Promise<{ crumb: string; cookie: string }> {
-  const res = await fetch(
-    "https://query1.finance.yahoo.com/v1/test/getcrumb",
-    { headers: HEADERS }
-  );
-  if (!res.ok) throw new Error(`Crumb fetch failed: ${res.status}`);
-  const crumb = await res.text();
-  const cookie = res.headers.get("set-cookie") ?? "";
-  return { crumb, cookie };
-}
 
 Deno.serve(async () => {
   try {
-    // 1. Pobierz crumb i cookie (wymagane przez Yahoo od 2023)
-    const { crumb, cookie } = await getYahooCrumb();
+    const apiKey = Deno.env.get("TWELVE_DATA_API_KEY");
+    if (!apiKey) throw new Error("Brak TWELVE_DATA_API_KEY");
 
-    // 2. Pobierz kursy
-    const url = new URL("https://query1.finance.yahoo.com/v8/finance/quote");
-    url.searchParams.set("symbols", Object.keys(SYMBOLS).join(","));
-    url.searchParams.set("crumb", crumb);
+    // Jeden request po wszystkie symbole
+    const url = new URL("https://api.twelvedata.com/price");
+    url.searchParams.set("symbol", Object.keys(SYMBOLS).join(","));
+    url.searchParams.set("apikey", apiKey);
 
-    const res = await fetch(url.toString(), {
-      headers: { ...HEADERS, "Cookie": cookie },
-    });
-
-    if (!res.ok) throw new Error(`Yahoo Finance error: ${res.status}`);
+    const res = await fetch(url.toString());
+    if (!res.ok) throw new Error(`Twelve Data error: ${res.status}`);
 
     const data = await res.json();
-    const quotes = data?.quoteResponse?.result ?? [];
 
-    if (quotes.length === 0) throw new Error("Yahoo Finance zwrócił puste dane");
+    // Zbuduj rekordy — odpowiedź to { "BTC/USD": { price: "43000" }, ... }
+    const rows = Object.entries(data)
+      .filter(([symbol, val]: [string, unknown]) => {
+        const v = val as { price?: string; code?: number };
+        return SYMBOLS[symbol] && v.price != null && v.code == null;
+      })
+      .map(([symbol, val]: [string, unknown]) => {
+        const v = val as { price: string };
+        return {
+          asset_id: SYMBOLS[symbol],
+          price_usd: parseFloat(v.price),
+          updated_at: new Date().toISOString(),
+        };
+      });
 
-    // 3. Zbuduj rekordy do upsert
-    const rows = quotes
-      .filter((q: { symbol: string; regularMarketPrice?: number }) =>
-        SYMBOLS[q.symbol] && q.regularMarketPrice != null
-      )
-      .map((q: { symbol: string; regularMarketPrice: number }) => ({
-        asset_id: SYMBOLS[q.symbol],
-        price_usd: q.regularMarketPrice,
-        updated_at: new Date().toISOString(),
-      }));
+    if (rows.length === 0) throw new Error("Brak danych z Twelve Data");
 
-    // 4. Zapisz do Supabase price_cache
+    // Zapisz do Supabase price_cache
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
