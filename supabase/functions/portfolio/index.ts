@@ -1,4 +1,3 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 const MOCK_PORTFOLIO = {
   total_value: 127430.50,
@@ -35,7 +34,7 @@ const MOCK_PORTFOLIO = {
   ],
 };
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method !== "GET") {
     return new Response("Method Not Allowed", { status: 405 });
   }

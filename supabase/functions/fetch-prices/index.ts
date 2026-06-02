@@ -1,5 +1,4 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 
 // Mapowanie: Yahoo symbol → nasz asset_id w price_cache
 const SYMBOLS: Record<string, string> = {
@@ -24,7 +23,7 @@ const YAHOO_URL =
   "https://query1.finance.yahoo.com/v8/finance/quote?symbols=" +
   Object.keys(SYMBOLS).join(",");
 
-serve(async () => {
+Deno.serve(async () => {
   try {
     // 1. Pobierz kursy z Yahoo Finance
     const res = await fetch(YAHOO_URL, {
