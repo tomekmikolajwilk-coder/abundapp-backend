@@ -26,39 +26,64 @@ const SYMBOLS: Record<string, string> = {
   "NVDA": "NVDA",
 };
 
+const BATCH_SIZE = 8; // free tier: 8 creditów/minutę
+const BATCH_DELAY_MS = 61_000; // 61 sekund między batchami
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    result.push(arr.slice(i, i + size));
+  }
+  return result;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchBatch(
+  symbols: string[],
+  apiKey: string
+): Promise<{ asset_id: string; price_usd: number; updated_at: string }[]> {
+  const url = new URL("https://api.twelvedata.com/price");
+  url.searchParams.set("symbol", symbols.join(","));
+  url.searchParams.set("apikey", apiKey);
+
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`Twelve Data error: ${res.status}`);
+
+  const data = await res.json();
+
+  // Gdy tylko 1 symbol — API zwraca obiekt bez zagnieżdżenia
+  const normalized: Record<string, { price?: string; code?: number }> =
+    symbols.length === 1 ? { [symbols[0]]: data } : data;
+
+  return Object.entries(normalized)
+    .filter(([symbol, val]) => SYMBOLS[symbol] && val.price != null && val.code == null)
+    .map(([symbol, val]) => ({
+      asset_id: SYMBOLS[symbol],
+      price_usd: parseFloat(val.price!),
+      updated_at: new Date().toISOString(),
+    }));
+}
+
 Deno.serve(async () => {
   try {
     const apiKey = Deno.env.get("TWELVE_DATA_API_KEY");
     if (!apiKey) throw new Error("Brak TWELVE_DATA_API_KEY");
 
-    // Jeden request po wszystkie symbole
-    const url = new URL("https://api.twelvedata.com/price");
-    url.searchParams.set("symbol", Object.keys(SYMBOLS).join(","));
-    url.searchParams.set("apikey", apiKey);
+    const allSymbols = Object.keys(SYMBOLS);
+    const batches = chunk(allSymbols, BATCH_SIZE);
+    const allRows: { asset_id: string; price_usd: number; updated_at: string }[] = [];
 
-    const res = await fetch(url.toString());
-    if (!res.ok) throw new Error(`Twelve Data error: ${res.status}`);
+    for (let i = 0; i < batches.length; i++) {
+      if (i > 0) await sleep(BATCH_DELAY_MS); // czekaj między batchami
+      const rows = await fetchBatch(batches[i], apiKey);
+      allRows.push(...rows);
+    }
 
-    const data = await res.json();
+    if (allRows.length === 0) throw new Error("Brak danych z Twelve Data");
 
-    // Zbuduj rekordy — odpowiedź to { "BTC/USD": { price: "43000" }, ... }
-    const rows = Object.entries(data)
-      .filter(([symbol, val]: [string, unknown]) => {
-        const v = val as { price?: string; code?: number };
-        return SYMBOLS[symbol] && v.price != null && v.code == null;
-      })
-      .map(([symbol, val]: [string, unknown]) => {
-        const v = val as { price: string };
-        return {
-          asset_id: SYMBOLS[symbol],
-          price_usd: parseFloat(v.price),
-          updated_at: new Date().toISOString(),
-        };
-      });
-
-    if (rows.length === 0) throw new Error("Brak danych z Twelve Data");
-
-    // Zapisz do Supabase price_cache
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
@@ -66,12 +91,12 @@ Deno.serve(async () => {
 
     const { error } = await supabase
       .from("price_cache")
-      .upsert(rows, { onConflict: "asset_id" });
+      .upsert(allRows, { onConflict: "asset_id" });
 
     if (error) throw error;
 
     return new Response(
-      JSON.stringify({ success: true, updated: rows.length, assets: rows }),
+      JSON.stringify({ success: true, updated: allRows.length, assets: allRows }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
   } catch (err) {
