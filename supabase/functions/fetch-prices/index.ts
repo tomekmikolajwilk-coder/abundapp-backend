@@ -185,8 +185,9 @@ async function writeLog(
   warnings: string | null
 ): Promise<void> {
   const { error } = await supabase.from("cron_logs").insert({
+    function_name: "fetch-prices",
     success,
-    assets_updated: assetsUpdated,
+    items_processed: assetsUpdated,
     error_message: errorMessage,
     warnings,
   });
