@@ -1,33 +1,39 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
-type PriceRow = { asset_id: string; price_usd: number; updated_at: string };
+type PriceRow = {
+  asset_id: string;
+  price_usd: number;
+  category: string;
+  updated_at: string;
+};
 type FetchResult = { rows: PriceRow[]; errors: string[] };
+type SymbolDef = { asset_id: string; category: string };
 
 // Twelve Data: akcje, krypto, waluty
-const TWELVE_DATA_SYMBOLS: Record<string, string> = {
-  "BTC/USD": "BTC",
-  "ETH/USD": "ETH",
-  "SOL/USD": "SOL",
-  "EUR/USD": "EUR",
-  "GBP/USD": "GBP",
-  "JPY/USD": "JPY",
-  "CHF/USD": "CHF",
-  "CAD/USD": "CAD",
-  "PLN/USD": "PLN",
-  "AAPL": "AAPL",
-  "MSFT": "MSFT",
-  "GOOGL": "GOOGL",
-  "AMZN": "AMZN",
-  "TSLA": "TSLA",
-  "NVDA": "NVDA",
+const TWELVE_DATA_SYMBOLS: Record<string, SymbolDef> = {
+  "BTC/USD": { asset_id: "BTC", category: "crypto" },
+  "ETH/USD": { asset_id: "ETH", category: "crypto" },
+  "SOL/USD": { asset_id: "SOL", category: "crypto" },
+  "EUR/USD": { asset_id: "EUR", category: "currency" },
+  "GBP/USD": { asset_id: "GBP", category: "currency" },
+  "JPY/USD": { asset_id: "JPY", category: "currency" },
+  "CHF/USD": { asset_id: "CHF", category: "currency" },
+  "CAD/USD": { asset_id: "CAD", category: "currency" },
+  "PLN/USD": { asset_id: "PLN", category: "currency" },
+  "AAPL":    { asset_id: "AAPL", category: "stock" },
+  "MSFT":    { asset_id: "MSFT", category: "stock" },
+  "GOOGL":   { asset_id: "GOOGL", category: "stock" },
+  "AMZN":    { asset_id: "AMZN", category: "stock" },
+  "TSLA":    { asset_id: "TSLA", category: "stock" },
+  "NVDA":    { asset_id: "NVDA", category: "stock" },
 };
 
 // Metals.Dev: metale szlachetne
-const METALS_DEV_MAP: Record<string, string> = {
-  gold: "XAU",
-  silver: "XAG",
-  platinum: "XPT",
-  palladium: "XPD",
+const METALS_DEV_MAP: Record<string, SymbolDef> = {
+  gold:      { asset_id: "XAU", category: "metal" },
+  silver:    { asset_id: "XAG", category: "metal" },
+  platinum:  { asset_id: "XPT", category: "metal" },
+  palladium: { asset_id: "XPD", category: "metal" },
 };
 
 const BATCH_SIZE = 8;
@@ -73,11 +79,13 @@ async function fetchTwelveData(apiKey: string): Promise<FetchResult> {
         batches[i].length === 1 ? { [batches[i][0]]: data } : data;
 
       for (const [symbol, val] of Object.entries(normalized)) {
-        if (!TWELVE_DATA_SYMBOLS[symbol]) continue;
+        const def = TWELVE_DATA_SYMBOLS[symbol];
+        if (!def) continue;
         if (val.price != null && val.code == null) {
           rows.push({
-            asset_id: TWELVE_DATA_SYMBOLS[symbol],
+            asset_id: def.asset_id,
             price_usd: parseFloat(val.price),
+            category: def.category,
             updated_at: new Date().toISOString(),
           });
         } else {
@@ -99,14 +107,14 @@ async function fetchTwelveData(apiKey: string): Promise<FetchResult> {
 }
 
 async function fetchMetalsDev(apiKey: string): Promise<FetchResult> {
-  const now = new Date().toISOString();
   const rows: PriceRow[] = [];
   const errors: string[] = [];
+  const now = new Date().toISOString();
 
   console.log(`[MetalsDev] Start — metale: ${Object.keys(METALS_DEV_MAP).join(", ")}`);
 
   const settled = await Promise.allSettled(
-    Object.entries(METALS_DEV_MAP).map(async ([metal, asset_id]) => {
+    Object.entries(METALS_DEV_MAP).map(async ([metal, def]) => {
       const url = new URL("https://api.metals.dev/v1/metal/spot");
       url.searchParams.set("api_key", apiKey);
       url.searchParams.set("metal", metal);
@@ -119,8 +127,13 @@ async function fetchMetalsDev(apiKey: string): Promise<FetchResult> {
       const data = await res.json();
       if (data.status !== "success") throw new Error(data.message ?? "unknown error");
 
-      console.log(`[MetalsDev] ${metal} (${asset_id}): $${data.rate.price}`);
-      return { asset_id, price_usd: data.rate.price, updated_at: now };
+      console.log(`[MetalsDev] ${metal} (${def.asset_id}): $${data.rate.price}`);
+      return {
+        asset_id: def.asset_id,
+        price_usd: data.rate.price,
+        category: def.category,
+        updated_at: now,
+      };
     })
   );
 
