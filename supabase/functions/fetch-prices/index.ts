@@ -47,20 +47,29 @@ async function fetchTwelveData(apiKey: string): Promise<PriceRow[]> {
   const batches = chunk(allSymbols, BATCH_SIZE);
   const rows: PriceRow[] = [];
 
+  console.log(`[TwelveData] Start — ${allSymbols.length} symboli w ${batches.length} batchach`);
+
   for (let i = 0; i < batches.length; i++) {
-    if (i > 0) await sleep(BATCH_DELAY_MS);
+    if (i > 0) {
+      console.log(`[TwelveData] Czekam 61s przed batchem ${i + 1}...`);
+      await sleep(BATCH_DELAY_MS);
+    }
+
+    console.log(`[TwelveData] Batch ${i + 1}/${batches.length}: ${batches[i].join(", ")}`);
 
     const url = new URL("https://api.twelvedata.com/price");
     url.searchParams.set("symbol", batches[i].join(","));
     url.searchParams.set("apikey", apiKey);
 
     const res = await fetch(url.toString());
+    console.log(`[TwelveData] Batch ${i + 1} HTTP status: ${res.status}`);
     if (!res.ok) throw new Error(`Twelve Data error: ${res.status}`);
-    const data = await res.json();
 
+    const data = await res.json();
     const normalized: Record<string, { price?: string; code?: number }> =
       batches[i].length === 1 ? { [batches[i][0]]: data } : data;
 
+    let batchCount = 0;
     for (const [symbol, val] of Object.entries(normalized)) {
       if (TWELVE_DATA_SYMBOLS[symbol] && val.price != null && val.code == null) {
         rows.push({
@@ -68,15 +77,23 @@ async function fetchTwelveData(apiKey: string): Promise<PriceRow[]> {
           price_usd: parseFloat(val.price),
           updated_at: new Date().toISOString(),
         });
+        batchCount++;
+      } else if (val.code != null) {
+        console.warn(`[TwelveData] Pominięto ${symbol}: code=${val.code}`);
       }
     }
+    console.log(`[TwelveData] Batch ${i + 1} — pobrano ${batchCount} kursów`);
   }
 
+  console.log(`[TwelveData] Zakończono — łącznie ${rows.length} kursów`);
   return rows;
 }
 
 async function fetchMetalsDev(apiKey: string): Promise<PriceRow[]> {
   const now = new Date().toISOString();
+  const metals = Object.keys(METALS_DEV_MAP);
+  console.log(`[MetalsDev] Start — metale: ${metals.join(", ")}`);
+
   const results = await Promise.all(
     Object.entries(METALS_DEV_MAP).map(async ([metal, asset_id]) => {
       const url = new URL("https://api.metals.dev/v1/metal/spot");
@@ -85,23 +102,31 @@ async function fetchMetalsDev(apiKey: string): Promise<PriceRow[]> {
       url.searchParams.set("currency", "USD");
 
       const res = await fetch(url.toString());
+      console.log(`[MetalsDev] ${metal} HTTP status: ${res.status}`);
       if (!res.ok) throw new Error(`Metals.Dev error for ${metal}: ${res.status}`);
 
       const data = await res.json();
       if (data.status !== "success") throw new Error(`Metals.Dev ${metal}: ${data.message}`);
 
+      console.log(`[MetalsDev] ${metal} (${asset_id}): $${data.rate.price}`);
       return { asset_id, price_usd: data.rate.price, updated_at: now };
     })
   );
+
+  console.log(`[MetalsDev] Zakończono — pobrano ${results.length} kursów`);
   return results;
 }
 
 async function sendErrorEmail(errorMsg: string): Promise<void> {
   const resendKey = Deno.env.get("RESEND_API_KEY");
   const alertEmail = Deno.env.get("ALERT_EMAIL");
-  if (!resendKey || !alertEmail) return;
+  if (!resendKey || !alertEmail) {
+    console.warn("[Email] Brak RESEND_API_KEY lub ALERT_EMAIL — pomijam wysyłkę");
+    return;
+  }
 
-  await fetch("https://api.resend.com/emails", {
+  console.log(`[Email] Wysyłam alert na ${alertEmail}`);
+  const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${resendKey}`,
@@ -118,6 +143,7 @@ async function sendErrorEmail(errorMsg: string): Promise<void> {
       `,
     }),
   });
+  console.log(`[Email] Resend HTTP status: ${res.status}`);
 }
 
 async function writeLog(
@@ -126,14 +152,21 @@ async function writeLog(
   assetsUpdated: number | null,
   errorMessage: string | null
 ): Promise<void> {
-  await supabase.from("cron_logs").insert({
+  const { error } = await supabase.from("cron_logs").insert({
     success,
     assets_updated: assetsUpdated,
     error_message: errorMessage,
   });
+  if (error) {
+    console.error(`[DB] Błąd zapisu do cron_logs: ${error.message}`);
+  } else {
+    console.log(`[DB] cron_logs zapisany — success=${success}, assets_updated=${assetsUpdated}`);
+  }
 }
 
 Deno.serve(async () => {
+  console.log("=== fetch-prices START ===");
+
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
@@ -152,6 +185,8 @@ Deno.serve(async () => {
     ]);
 
     const allRows = [...twelveRows, ...metalRows];
+    console.log(`[DB] Zapisuję ${allRows.length} kursów do price_cache...`);
+
     if (allRows.length === 0) throw new Error("Brak danych z obu źródeł");
 
     const { error } = await supabase
@@ -159,21 +194,25 @@ Deno.serve(async () => {
       .upsert(allRows, { onConflict: "asset_id" });
 
     if (error) throw error;
+    console.log(`[DB] price_cache zaktualizowany pomyślnie`);
 
     await writeLog(supabase, true, allRows.length, null);
 
+    console.log("=== fetch-prices DONE ===");
     return new Response(
       JSON.stringify({ success: true, updated: allRows.length, assets: allRows }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
   } catch (err) {
     const errorMsg = String(err);
+    console.error(`[ERROR] ${errorMsg}`);
 
     await Promise.all([
       writeLog(supabase, false, null, errorMsg),
       sendErrorEmail(errorMsg),
     ]);
 
+    console.log("=== fetch-prices FAILED ===");
     return new Response(
       JSON.stringify({ success: false, error: errorMsg }),
       { status: 500, headers: { "Content-Type": "application/json" } }
