@@ -69,32 +69,47 @@ async function fetchTwelveData(apiKey: string): Promise<PriceRow[]> {
   return rows;
 }
 
-// Metals.live: srebro (XAG) — darmowe, bez klucza
-async function fetchMetals(): Promise<PriceRow[]> {
-  const res = await fetch("https://api.metals.live/v1/spot/silver");
-  if (!res.ok) throw new Error(`Metals.live error: ${res.status}`);
+// Metals.Dev: srebro (XAG), platyna (XPT), pallad (XPD)
+const METALS_DEV_MAP: Record<string, string> = {
+  silver: "XAG",
+  platinum: "XPT",
+  palladium: "XPD",
+};
+
+async function fetchMetalsDev(apiKey: string): Promise<PriceRow[]> {
+  const url = new URL("https://metals.dev/api/spot");
+  url.searchParams.set("api_key", apiKey);
+  url.searchParams.set("currency", "USD");
+  url.searchParams.set("unit", "toz");
+
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`Metals.Dev error: ${res.status}`);
 
   const data = await res.json();
-  // Odpowiedź: [{ "silver": 27.80 }]
-  const silver = Array.isArray(data) ? data[0]?.silver : data?.silver;
-  if (!silver) throw new Error("Metals.live: brak danych dla srebra");
+  if (data.status !== "success") throw new Error(`Metals.Dev: ${data.message}`);
 
-  return [{
-    asset_id: "XAG",
-    price_usd: parseFloat(silver),
-    updated_at: new Date().toISOString(),
-  }];
+  const now = new Date().toISOString();
+  return Object.entries(METALS_DEV_MAP)
+    .filter(([metal]) => data.metals?.[metal] != null)
+    .map(([metal, asset_id]) => ({
+      asset_id,
+      price_usd: data.metals[metal],
+      updated_at: now,
+    }));
 }
 
 Deno.serve(async () => {
   try {
-    const apiKey = Deno.env.get("TWELVE_DATA_API_KEY");
-    if (!apiKey) throw new Error("Brak TWELVE_DATA_API_KEY");
+    const twelveApiKey = Deno.env.get("TWELVE_DATA_API_KEY");
+    if (!twelveApiKey) throw new Error("Brak TWELVE_DATA_API_KEY");
 
-    // Pobierz dane z obu źródeł
+    const metalsApiKey = Deno.env.get("METALS_DEV_API_KEY");
+    if (!metalsApiKey) throw new Error("Brak METALS_DEV_API_KEY");
+
+    // Pobierz dane z obu źródeł równolegle
     const [twelveRows, metalRows] = await Promise.all([
-      fetchTwelveData(apiKey),
-      fetchMetals(),
+      fetchTwelveData(twelveApiKey),
+      fetchMetalsDev(metalsApiKey),
     ]);
 
     const allRows = [...twelveRows, ...metalRows];
