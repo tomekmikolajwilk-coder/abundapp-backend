@@ -20,7 +20,6 @@ const TWELVE_DATA_SYMBOLS: Record<string, string> = {
   "AMZN": "AMZN",
   "TSLA": "TSLA",
   "NVDA": "NVDA",
-  "FAKESTCK": "FAKE",       // TEST: nieistniejący ticker — usuń po teście
 };
 
 // Metals.Dev: metale szlachetne
@@ -29,7 +28,6 @@ const METALS_DEV_MAP: Record<string, string> = {
   silver: "XAG",
   platinum: "XPT",
   palladium: "XPD",
-  unobtanium: "UNO",        // TEST: nieistniejący metal — usuń po teście
 };
 
 const BATCH_SIZE = 8;
@@ -160,7 +158,7 @@ async function sendAlertEmail(subject: string, body: string): Promise<void> {
       from: "abundapp <onboarding@resend.dev>",
       to: alertEmail,
       subject,
-      html: `<p><strong>Czas:</strong> ${new Date().toISOString()}</p><pre style="background:#f4f4f4;padding:12px">${body}</pre>`,
+      html: `<p><strong>Czas:</strong> ${new Date().toISOString()}</p><pre style="background:#f4f4f4;padding:12px;line-height:2">${body.split("\n").join("<br>")}</pre>`,
     }),
   });
   console.log(`[Email] Resend HTTP status: ${res.status}`);
