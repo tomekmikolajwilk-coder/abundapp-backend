@@ -3,16 +3,17 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 type HoldingEntry = {
   asset_id: string;
   category: string;
-  amount: number;         // ilość sztuk którą user posiada
-  price_usd: number;      // aktualny kurs w USD
-  value_usd: number;      // amount * price_usd
-  value_ccy: number;      // wartość w preferred_currency usera (np. PLN)
-  value_selected?: number; // wartość w walucie z ?currency=X — tylko jeśli podano
+  amount: number;
+  price_usd: number;
+  value_usd: number;
+  value_ccy: number;
+  value_selected?: number;
 };
 
 // GET /portfolio?user_id=UUID
-// GET /portfolio?user_id=UUID&date=2026-01-01       → historyczny snapshot zamiast live
-// GET /portfolio?user_id=UUID&currency=EUR          → dodatkowe przeliczenie na wybraną walutę
+// GET /portfolio?user_id=UUID&date=2026-06-03              → ostatni snapshot z tego dnia
+// GET /portfolio?user_id=UUID&date=2026-06-03T10:30:00Z    → ostatni snapshot przed tym momentem
+// GET /portfolio?user_id=UUID&currency=EUR                 → dodatkowe przeliczenie na EUR
 Deno.serve(async (req) => {
   console.log("=== portfolio START ===");
 
@@ -37,8 +38,7 @@ Deno.serve(async (req) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   );
 
-  // Jeśli user podał ?currency=X, sprawdzamy czy ta waluta istnieje w price_cache
-  // i pobieramy jej kurs — posłuży do wyliczenia value_selected dla każdego aktywa.
+  // Jeśli user podał ?currency=X, pobieramy jej kurs żeby wyliczyć value_selected.
   let selectedCurrencyPrice: number | null = null;
   if (currencyParam) {
     const { data: ccyRow, error: ccyErr } = await supabase
@@ -58,13 +58,21 @@ Deno.serve(async (req) => {
     console.log(`[portfolio] selected currency ${currencyParam} = $${selectedCurrencyPrice} USD`);
   }
 
-  // ── HISTORYCZNY widok — dane z zapisanego snapshotu ────────────────────────
+  // ── HISTORYCZNY: szukamy ostatniego snapshotu przed podanym momentem ──────
   if (dateParam) {
+    // Jeśli podano samą datę (YYYY-MM-DD), szukamy do końca tego dnia.
+    // Jeśli podano pełny timestamp, szukamy do tego dokładnego momentu.
+    const before = dateParam.length === 10
+      ? `${dateParam}T23:59:59.999Z`
+      : dateParam;
+
     const { data: snapshot, error: snapErr } = await supabase
       .from("portfolio_snapshots")
-      .select("currency, holdings_breakdown, captured_at")
+      .select("currency, holdings_breakdown, captured_at, source")
       .eq("user_id", userId)
-      .eq("captured_at", dateParam)
+      .lte("captured_at", before)        // snapshot musi być przed (lub równy) podanemu momentowi
+      .order("captured_at", { ascending: false })
+      .limit(1)
       .single();
 
     if (snapErr || !snapshot) {
@@ -76,8 +84,6 @@ Deno.serve(async (req) => {
 
     let holdings = snapshot.holdings_breakdown as HoldingEntry[];
 
-    // value_selected liczymy po AKTUALNYM kursie — snapshot nie przechowuje historycznych kursów
-    // wszystkich walut, tylko preferred_currency usera z tamtego dnia.
     if (selectedCurrencyPrice !== null) {
       holdings = holdings.map((h) => ({
         ...h,
@@ -86,7 +92,7 @@ Deno.serve(async (req) => {
     }
 
     console.log(
-      `[portfolio] snapshot ${dateParam} — ${holdings.length} assets, currency=${snapshot.currency}`
+      `[portfolio] snapshot ${snapshot.captured_at} (${snapshot.source}) — ${holdings.length} assets`
     );
     console.log("=== portfolio DONE ===");
 
@@ -94,14 +100,14 @@ Deno.serve(async (req) => {
       JSON.stringify({
         currency: snapshot.currency,
         captured_at: snapshot.captured_at,
+        source: snapshot.source,
         holdings_breakdown: holdings,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
   }
 
-  // ── LIVE widok — liczymy na bieżąco z profiles + price_cache ──────────────
-  // Oba zapytania lecimy równolegle — nie ma powodu czekać na jedno przed drugim.
+  // ── LIVE: liczymy na bieżąco z profiles + price_cache ─────────────────────
   const [profileResult, pricesResult] = await Promise.all([
     supabase.from("profiles").select("preferred_currency, holdings").eq("id", userId).single(),
     supabase.from("price_cache").select("asset_id, price_usd, category"),
@@ -123,15 +129,11 @@ Deno.serve(async (req) => {
 
   const { preferred_currency, holdings } = profileResult.data;
 
-  // Zamieniamy tablicę z bazy na słownik asset_id → { price_usd, category }
-  // żeby móc szybko wyszukiwać kurs po nazwie aktywa przy iteracji po holdings.
   const priceMap: Record<string, { price_usd: number; category: string }> = {};
   for (const p of pricesResult.data) {
     priceMap[p.asset_id] = { price_usd: p.price_usd, category: p.category };
   }
 
-  // Kurs preferred_currency (np. PLN) potrzebny do przeliczenia value_usd → value_ccy.
-  // Logika: 1 PLN = ccyPrice USD, więc X USD = X / ccyPrice PLN.
   const ccyPrice = priceMap[preferred_currency]?.price_usd ?? null;
   if (!ccyPrice) {
     console.warn(`[portfolio] preferred_currency ${preferred_currency} not found in price_cache`);
@@ -140,17 +142,12 @@ Deno.serve(async (req) => {
   const breakdown: HoldingEntry[] = [];
   for (const [asset_id, amount] of Object.entries(holdings as Record<string, number>)) {
     const info = priceMap[asset_id];
-
-    // Jeśli aktywo nie ma kursu w cache (np. nowy ticker jeszcze nie pobrany) — pomijamy je.
-    // Nie failujemy całego requestu z powodu jednego brakującego kursu.
     if (!info) {
       console.warn(`[portfolio] No price for ${asset_id}, skipping`);
       continue;
     }
-
     const value_usd = (amount as number) * info.price_usd;
     const value_ccy = ccyPrice != null ? value_usd / ccyPrice : value_usd;
-
     const entry: HoldingEntry = {
       asset_id,
       category: info.category,
@@ -159,17 +156,27 @@ Deno.serve(async (req) => {
       value_usd,
       value_ccy,
     };
-
     if (selectedCurrencyPrice !== null) {
       entry.value_selected = value_usd / selectedCurrencyPrice;
     }
-
     breakdown.push(entry);
   }
 
-  console.log(
-    `[portfolio] live — ${breakdown.length} assets, currency=${preferred_currency}`
-  );
+  // Zapisujemy snapshot wizyty — user otworzył aplikację, zapamiętujemy stan portfela.
+  // Nie failujemy całego requestu jeśli zapis się nie uda — dane live są ważniejsze.
+  const visitSnapshot = {
+    user_id: userId,
+    currency: preferred_currency,
+    holdings_breakdown: breakdown,
+    captured_at: new Date().toISOString(),
+    source: "visit",
+  };
+  supabase.from("portfolio_snapshots").insert(visitSnapshot).then(({ error }) => {
+    if (error) console.warn(`[portfolio] Nie udało się zapisać visit snapshot: ${error.message}`);
+    else console.log(`[portfolio] Visit snapshot saved`);
+  });
+
+  console.log(`[portfolio] live — ${breakdown.length} assets, currency=${preferred_currency}`);
   console.log("=== portfolio DONE ===");
 
   return new Response(

@@ -136,8 +136,13 @@ Deno.serve(async () => {
   results.push(await run(`portfolio historyczny ?date=${TODAY}: zwraca 200 po snapszotcie`, async () => {
     const { status, body } = await get(`portfolio?user_id=${TEST_USER_ID}&date=${TODAY}`);
     assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
-    assert((body as { captured_at: string }).captured_at === TODAY,
-      `captured_at powinno być ${TODAY}, jest ${(body as { captured_at: string }).captured_at}`);
+    // captured_at to teraz pełny timestamp — sprawdzamy tylko czy zaczyna się od dzisiejszej daty
+    const capturedAt = (body as { captured_at: string }).captured_at;
+    assert(capturedAt.startsWith(TODAY),
+      `captured_at powinno zaczynać się od ${TODAY}, jest ${capturedAt}`);
+    // source powinno być 'cron' (snapshot-portfolio tworzy cron snapshoty)
+    assert((body as { source: string }).source === "cron",
+      `source powinno być 'cron', jest ${(body as { source: string }).source}`);
   }));
 
   results.push(await run(`portfolio historyczny ?date=${TODAY}&currency=EUR: ma value_selected`, async () => {

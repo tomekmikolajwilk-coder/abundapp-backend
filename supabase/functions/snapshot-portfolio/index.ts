@@ -4,13 +4,11 @@ type HoldingEntry = {
   asset_id: string;
   category: string;
   amount: number;
-  price_usd: number;  // kurs z dnia snapshotu — dzięki temu historia jest wierna
+  price_usd: number;
   value_usd: number;
-  value_ccy: number;  // wartość w preferred_currency usera z dnia snapshotu
+  value_ccy: number;
 };
 
-// Zapisuje wynik do cron_logs — żeby mieć historię uruchomień w jednym miejscu
-// (razem z fetch-prices, które też tam pisze).
 async function writeLog(
   supabase: ReturnType<typeof createClient>,
   success: boolean,
@@ -28,7 +26,6 @@ async function writeLog(
   if (error) console.error(`[DB] Błąd zapisu do cron_logs: ${error.message}`);
 }
 
-// Wysyła alert mailowy przez Resend — tylko na błąd, żeby nie zaśmiecać skrzynki.
 async function sendAlertEmail(subject: string, body: string): Promise<void> {
   const resendKey = Deno.env.get("RESEND_API_KEY");
   const alertEmail = Deno.env.get("ALERT_EMAIL");
@@ -49,8 +46,7 @@ async function sendAlertEmail(subject: string, body: string): Promise<void> {
   console.log(`[Email] Resend HTTP status: ${res.status}`);
 }
 
-// Wywoływana przez pg_cron raz dziennie — zapisuje stan portfela każdego usera.
-// Dzięki temu nawet jeśli user nie logował się przez miesiąc, może zobaczyć historię.
+// Wywoływana przez pg_cron raz dziennie — zapisuje stan portfela wszystkich userów.
 Deno.serve(async () => {
   console.log("=== snapshot-portfolio START ===");
 
@@ -60,7 +56,6 @@ Deno.serve(async () => {
   );
 
   try {
-    // Pobieramy ceny i profile równolegle — oba są potrzebne do kalkulacji.
     const [pricesResult, profilesResult] = await Promise.all([
       supabase.from("price_cache").select("asset_id, price_usd, category"),
       supabase.from("profiles").select("id, preferred_currency, holdings"),
@@ -78,20 +73,35 @@ Deno.serve(async () => {
 
     console.log(`[snapshot] ${profiles.length} users, ${prices.length} assets in price_cache`);
 
-    // Słownik asset_id → kurs — żeby szybko wyszukiwać przy iteracji po holdings każdego usera.
     const priceMap: Record<string, { price_usd: number; category: string }> = {};
     for (const p of prices) {
       priceMap[p.asset_id] = { price_usd: p.price_usd, category: p.category };
     }
 
-    const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+    const now = new Date();
+    const todayStart = new Date(now);
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const todayEnd = new Date(now);
+    todayEnd.setUTCHours(23, 59, 59, 999);
+
+    // Usuwamy poprzedni cron-snapshot z dzisiaj zanim zapiszemy nowy.
+    // To zastępuje upsert — bo nie mamy już unique constraint na (user_id, captured_at).
+    const { error: deleteError } = await supabase
+      .from("portfolio_snapshots")
+      .delete()
+      .eq("source", "cron")
+      .gte("captured_at", todayStart.toISOString())
+      .lte("captured_at", todayEnd.toISOString());
+
+    if (deleteError) console.warn(`[snapshot] Błąd usuwania starych cron-snaphotów: ${deleteError.message}`);
+
     const warnings: string[] = [];
 
     const snapshots = profiles.map((profile) => {
       const currency = profile.preferred_currency as string;
       const holdings = profile.holdings as Record<string, number>;
-
       const ccyPrice = priceMap[currency]?.price_usd ?? null;
+
       if (!ccyPrice) {
         const w = `User ${profile.id}: currency ${currency} not in price_cache`;
         console.warn(`[snapshot] ⚠️ ${w}`);
@@ -101,33 +111,23 @@ Deno.serve(async () => {
       const breakdown: HoldingEntry[] = [];
       for (const [asset_id, amount] of Object.entries(holdings)) {
         const info = priceMap[asset_id];
-
-        // Pomijamy aktywa bez kursu — nie blokujemy snapshotu z powodu jednego brakującego tickera.
         if (!info) {
           const w = `User ${profile.id}: brak kursu dla ${asset_id}`;
           console.warn(`[snapshot] ⚠️ ${w}`);
           warnings.push(w);
           continue;
         }
-
         const value_usd = amount * info.price_usd;
         const value_ccy = ccyPrice != null ? value_usd / ccyPrice : value_usd;
-
-        breakdown.push({
-          asset_id,
-          category: info.category,
-          amount,
-          price_usd: info.price_usd,
-          value_usd,
-          value_ccy,
-        });
+        breakdown.push({ asset_id, category: info.category, amount, price_usd: info.price_usd, value_usd, value_ccy });
       }
 
       return {
         user_id: profile.id,
         currency,
         holdings_breakdown: breakdown,
-        captured_at: today,
+        captured_at: now.toISOString(),
+        source: "cron",
       };
     });
 
@@ -135,20 +135,18 @@ Deno.serve(async () => {
       console.log("[snapshot] Brak userów do snapshotu");
       await writeLog(supabase, true, 0, null, null);
       return new Response(
-        JSON.stringify({ success: true, snapshots: 0, date: today }),
+        JSON.stringify({ success: true, snapshots: 0 }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // Upsert zamiast insert — jeśli cron odpalił się dwa razy tego samego dnia,
-    // nadpisujemy snapshot zamiast rzucać błąd o duplikacie.
-    const { error: upsertError } = await supabase
+    const { error: insertError } = await supabase
       .from("portfolio_snapshots")
-      .upsert(snapshots, { onConflict: "user_id,captured_at" });
+      .insert(snapshots);
 
-    if (upsertError) throw upsertError;
+    if (insertError) throw insertError;
 
-    console.log(`[snapshot] Upserted ${snapshots.length} snapshots for ${today}`);
+    console.log(`[snapshot] Inserted ${snapshots.length} snapshots`);
 
     const warningsText = warnings.length > 0 ? warnings.join("\n") : null;
     await writeLog(supabase, true, snapshots.length, null, warningsText);
@@ -156,19 +154,17 @@ Deno.serve(async () => {
     console.log("=== snapshot-portfolio DONE ===");
 
     return new Response(
-      JSON.stringify({ success: true, snapshots: snapshots.length, date: today, warnings }),
+      JSON.stringify({ success: true, snapshots: snapshots.length, warnings }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
 
   } catch (err) {
     const errorMsg = String(err);
     console.error(`[snapshot] ERROR: ${errorMsg}`);
-
     await Promise.all([
       writeLog(supabase, false, null, errorMsg, null),
       sendAlertEmail("❌ abundapp: błąd snapshot-portfolio", errorMsg),
     ]);
-
     console.log("=== snapshot-portfolio FAILED ===");
     return new Response(
       JSON.stringify({ success: false, error: errorMsg }),
