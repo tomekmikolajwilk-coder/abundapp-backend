@@ -2,7 +2,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 
 type PriceRow = { asset_id: string; price_usd: number; updated_at: string };
 
-// Twelve Data: akcje, krypto, złoto, waluty
+// Twelve Data: akcje, krypto, waluty
 const TWELVE_DATA_SYMBOLS: Record<string, string> = {
   "BTC/USD": "BTC",
   "ETH/USD": "ETH",
@@ -21,7 +21,15 @@ const TWELVE_DATA_SYMBOLS: Record<string, string> = {
   "NVDA": "NVDA",
 };
 
-const BATCH_SIZE = 8;       // free tier: 8 creditów/minutę
+// Metals.Dev: metale szlachetne
+const METALS_DEV_MAP: Record<string, string> = {
+  gold: "XAU",
+  silver: "XAG",
+  platinum: "XPT",
+  palladium: "XPD",
+};
+
+const BATCH_SIZE = 8;
 const BATCH_DELAY_MS = 61_000;
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -67,17 +75,8 @@ async function fetchTwelveData(apiKey: string): Promise<PriceRow[]> {
   return rows;
 }
 
-// Metals.Dev: srebro (XAG), platyna (XPT), pallad (XPD)
-const METALS_DEV_MAP: Record<string, string> = {
-  gold: "XAU",
-  silver: "XAG",
-  platinum: "XPT",
-  palladium: "XPD",
-};
-
 async function fetchMetalsDev(apiKey: string): Promise<PriceRow[]> {
   const now = new Date().toISOString();
-
   const results = await Promise.all(
     Object.entries(METALS_DEV_MAP).map(async ([metal, asset_id]) => {
       const url = new URL("https://api.metals.dev/v1/metal/spot");
@@ -94,11 +93,52 @@ async function fetchMetalsDev(apiKey: string): Promise<PriceRow[]> {
       return { asset_id, price_usd: data.rate.price, updated_at: now };
     })
   );
-
   return results;
 }
 
+async function sendErrorEmail(errorMsg: string): Promise<void> {
+  const resendKey = Deno.env.get("RESEND_API_KEY");
+  const alertEmail = Deno.env.get("ALERT_EMAIL");
+  if (!resendKey || !alertEmail) return;
+
+  await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${resendKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: "abundapp <onboarding@resend.dev>",
+      to: alertEmail,
+      subject: "❌ abundapp: błąd fetch-prices",
+      html: `
+        <h2>Funkcja fetch-prices zakończyła się błędem</h2>
+        <p><strong>Czas:</strong> ${new Date().toISOString()}</p>
+        <pre style="background:#f4f4f4;padding:12px">${errorMsg}</pre>
+      `,
+    }),
+  });
+}
+
+async function writeLog(
+  supabase: ReturnType<typeof createClient>,
+  success: boolean,
+  assetsUpdated: number | null,
+  errorMessage: string | null
+): Promise<void> {
+  await supabase.from("cron_logs").insert({
+    success,
+    assets_updated: assetsUpdated,
+    error_message: errorMessage,
+  });
+}
+
 Deno.serve(async () => {
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+  );
+
   try {
     const twelveApiKey = Deno.env.get("TWELVE_DATA_API_KEY");
     if (!twelveApiKey) throw new Error("Brak TWELVE_DATA_API_KEY");
@@ -106,19 +146,13 @@ Deno.serve(async () => {
     const metalsApiKey = Deno.env.get("METALS_DEV_API_KEY");
     if (!metalsApiKey) throw new Error("Brak METALS_DEV_API_KEY");
 
-    // Pobierz dane z obu źródeł równolegle
     const [twelveRows, metalRows] = await Promise.all([
       fetchTwelveData(twelveApiKey),
       fetchMetalsDev(metalsApiKey),
     ]);
 
     const allRows = [...twelveRows, ...metalRows];
-    if (allRows.length === 0) throw new Error("Brak danych");
-
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
+    if (allRows.length === 0) throw new Error("Brak danych z obu źródeł");
 
     const { error } = await supabase
       .from("price_cache")
@@ -126,13 +160,22 @@ Deno.serve(async () => {
 
     if (error) throw error;
 
+    await writeLog(supabase, true, allRows.length, null);
+
     return new Response(
       JSON.stringify({ success: true, updated: allRows.length, assets: allRows }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
   } catch (err) {
+    const errorMsg = String(err);
+
+    await Promise.all([
+      writeLog(supabase, false, null, errorMsg),
+      sendErrorEmail(errorMsg),
+    ]);
+
     return new Response(
-      JSON.stringify({ success: false, error: String(err) }),
+      JSON.stringify({ success: false, error: errorMsg }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
