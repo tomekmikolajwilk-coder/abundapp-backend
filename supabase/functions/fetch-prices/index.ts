@@ -8,7 +8,6 @@ const TWELVE_DATA_SYMBOLS: Record<string, string> = {
   "ETH/USD": "ETH",
   "SOL/USD": "SOL",
   "WTI/USD": "WTI",
-  "XAU/USD": "XAU",
   "EUR/USD": "EUR",
   "GBP/USD": "GBP",
   "JPY/USD": "JPY",
@@ -71,6 +70,7 @@ async function fetchTwelveData(apiKey: string): Promise<PriceRow[]> {
 
 // Metals.Dev: srebro (XAG), platyna (XPT), pallad (XPD)
 const METALS_DEV_MAP: Record<string, string> = {
+  gold: "XAU",
   silver: "XAG",
   platinum: "XPT",
   palladium: "XPD",
