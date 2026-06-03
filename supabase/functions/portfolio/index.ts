@@ -70,7 +70,8 @@ Deno.serve(async (req) => {
       .from("portfolio_snapshots")
       .select("currency, holdings_breakdown, captured_at, source")
       .eq("user_id", userId)
-      .lte("captured_at", before)        // snapshot musi być przed (lub równy) podanemu momentowi
+      .eq("source", "cron")              // tylko stabilne cron-snapshoty, nie visit
+      .lte("captured_at", before)
       .order("captured_at", { ascending: false })
       .limit(1)
       .single();
@@ -162,19 +163,27 @@ Deno.serve(async (req) => {
     breakdown.push(entry);
   }
 
-  // Zapisujemy snapshot wizyty — user otworzył aplikację, zapamiętujemy stan portfela.
-  // Nie failujemy całego requestu jeśli zapis się nie uda — dane live są ważniejsze.
-  const visitSnapshot = {
-    user_id: userId,
-    currency: preferred_currency,
-    holdings_breakdown: breakdown,
-    captured_at: new Date().toISOString(),
-    source: "visit",
-  };
-  supabase.from("portfolio_snapshots").insert(visitSnapshot).then(({ error }) => {
+  // Zapisujemy snapshot wizyty — zawsze tylko jeden wiersz na usera (ostatnia wizyta).
+  // Najpierw usuwamy poprzedni, potem wstawiamy nowy.
+  // Fire-and-forget — nie blokujemy odpowiedzi, błąd zapisu nie failuje requestu.
+  ;(async () => {
+    await supabase
+      .from("portfolio_snapshots")
+      .delete()
+      .eq("user_id", userId)
+      .eq("source", "visit");
+
+    const { error } = await supabase.from("portfolio_snapshots").insert({
+      user_id: userId,
+      currency: preferred_currency,
+      holdings_breakdown: breakdown,
+      captured_at: new Date().toISOString(),
+      source: "visit",
+    });
+
     if (error) console.warn(`[portfolio] Nie udało się zapisać visit snapshot: ${error.message}`);
     else console.log(`[portfolio] Visit snapshot saved`);
-  });
+  })();
 
   console.log(`[portfolio] live — ${breakdown.length} assets, currency=${preferred_currency}`);
   console.log("=== portfolio DONE ===");

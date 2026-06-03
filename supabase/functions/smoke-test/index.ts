@@ -133,16 +133,13 @@ Deno.serve(async () => {
       `Oczekiwano co najmniej 1 snapshot, jest ${(body as { snapshots: number }).snapshots}`);
   }));
 
-  results.push(await run(`portfolio historyczny ?date=${TODAY}: zwraca 200 po snapszotcie`, async () => {
+  results.push(await run(`portfolio historyczny ?date=${TODAY}: zwraca cron-snapshot`, async () => {
     const { status, body } = await get(`portfolio?user_id=${TEST_USER_ID}&date=${TODAY}`);
     assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
-    // captured_at to teraz pełny timestamp — sprawdzamy tylko czy zaczyna się od dzisiejszej daty
     const capturedAt = (body as { captured_at: string }).captured_at;
-    assert(capturedAt.startsWith(TODAY),
-      `captured_at powinno zaczynać się od ${TODAY}, jest ${capturedAt}`);
-    // source powinno być 'cron' (snapshot-portfolio tworzy cron snapshoty)
+    assert(capturedAt.startsWith(TODAY), `captured_at powinno zaczynać się od ${TODAY}, jest ${capturedAt}`);
     assert((body as { source: string }).source === "cron",
-      `source powinno być 'cron', jest ${(body as { source: string }).source}`);
+      `?date= powinno zwracać source='cron', dostałem '${(body as { source: string }).source}'`);
   }));
 
   results.push(await run(`portfolio historyczny ?date=${TODAY}&currency=EUR: ma value_selected`, async () => {
@@ -152,6 +149,36 @@ Deno.serve(async () => {
     assert(eur !== undefined, "Brak EUR w historycznym snapszotcie");
     assert(Math.abs((eur!.value_selected ?? -1) - 500) < 0.01,
       `Oczekiwano value_selected=500 (EUR→EUR), jest ${eur!.value_selected}`);
+  }));
+
+  // ── /last-visit ───────────────────────────────────────────────────────────
+  // Live portfolio call wyżej zapisał visit-snapshot — teraz weryfikujemy że jest dostępny.
+
+  results.push(await run("last-visit: zwraca 200 z captured_at i holdings_breakdown", async () => {
+    const { status, body } = await get(`last-visit?user_id=${TEST_USER_ID}`);
+    assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
+    assert(!!(body as { captured_at: string }).captured_at, "Brak pola captured_at");
+    assert(Array.isArray((body as { holdings_breakdown: unknown[] }).holdings_breakdown),
+      "holdings_breakdown nie jest tablicą");
+  }));
+
+  results.push(await run("last-visit ?currency=EUR: EUR value_selected=500", async () => {
+    const { body } = await get(`last-visit?user_id=${TEST_USER_ID}&currency=EUR`);
+    type Holding = { asset_id: string; value_selected?: number };
+    const eur = (body as { holdings_breakdown: Holding[] }).holdings_breakdown.find(h => h.asset_id === "EUR");
+    assert(eur !== undefined, "Brak EUR w last-visit");
+    assert(Math.abs((eur!.value_selected ?? -1) - 500) < 0.01,
+      `Oczekiwano value_selected=500, jest ${eur!.value_selected}`);
+  }));
+
+  results.push(await run("last-visit: brak user_id → 400", async () => {
+    const { status } = await get("last-visit");
+    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
+  }));
+
+  results.push(await run("last-visit: nieistniejący user → 404", async () => {
+    const { status } = await get("last-visit?user_id=00000000-0000-0000-0000-000000000000");
+    assert(status === 404, `Oczekiwano 404, dostałem ${status}`);
   }));
 
   // ── Podsumowanie ──────────────────────────────────────────────────────────
