@@ -77,25 +77,26 @@ const METALS_DEV_MAP: Record<string, string> = {
 };
 
 async function fetchMetalsDev(apiKey: string): Promise<PriceRow[]> {
-  const url = new URL("https://metals.dev/api/spot");
-  url.searchParams.set("api_key", apiKey);
-  url.searchParams.set("currency", "USD");
-  url.searchParams.set("unit", "toz");
-
-  const res = await fetch(url.toString());
-  if (!res.ok) throw new Error(`Metals.Dev error: ${res.status}`);
-
-  const data = await res.json();
-  if (data.status !== "success") throw new Error(`Metals.Dev: ${data.message}`);
-
   const now = new Date().toISOString();
-  return Object.entries(METALS_DEV_MAP)
-    .filter(([metal]) => data.metals?.[metal] != null)
-    .map(([metal, asset_id]) => ({
-      asset_id,
-      price_usd: data.metals[metal],
-      updated_at: now,
-    }));
+
+  const results = await Promise.all(
+    Object.entries(METALS_DEV_MAP).map(async ([metal, asset_id]) => {
+      const url = new URL("https://api.metals.dev/v1/metal/spot");
+      url.searchParams.set("api_key", apiKey);
+      url.searchParams.set("metal", metal);
+      url.searchParams.set("currency", "USD");
+
+      const res = await fetch(url.toString());
+      if (!res.ok) throw new Error(`Metals.Dev error for ${metal}: ${res.status}`);
+
+      const data = await res.json();
+      if (data.status !== "success") throw new Error(`Metals.Dev ${metal}: ${data.message}`);
+
+      return { asset_id, price_usd: data.rate.price, updated_at: now };
+    })
+  );
+
+  return results;
 }
 
 Deno.serve(async () => {
