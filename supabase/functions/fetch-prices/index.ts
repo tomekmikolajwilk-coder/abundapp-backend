@@ -7,7 +7,6 @@ const TWELVE_DATA_SYMBOLS: Record<string, string> = {
   "BTC/USD": "BTC",
   "ETH/USD": "ETH",
   "SOL/USD": "SOL",
-  "WTI/USD": "WTI",
   "EUR/USD": "EUR",
   "GBP/USD": "GBP",
   "JPY/USD": "JPY",
