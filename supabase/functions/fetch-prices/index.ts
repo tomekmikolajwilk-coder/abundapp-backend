@@ -1,6 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 type PriceRow = { asset_id: string; price_usd: number; updated_at: string };
+type FetchResult = { rows: PriceRow[]; errors: string[] };
 
 // Twelve Data: akcje, krypto, waluty
 const TWELVE_DATA_SYMBOLS: Record<string, string> = {
@@ -19,6 +20,7 @@ const TWELVE_DATA_SYMBOLS: Record<string, string> = {
   "AMZN": "AMZN",
   "TSLA": "TSLA",
   "NVDA": "NVDA",
+  "FAKESTCK": "FAKE",       // TEST: nieistniejący ticker — usuń po teście
 };
 
 // Metals.Dev: metale szlachetne
@@ -27,6 +29,7 @@ const METALS_DEV_MAP: Record<string, string> = {
   silver: "XAG",
   platinum: "XPT",
   palladium: "XPD",
+  unobtanium: "UNO",        // TEST: nieistniejący metal — usuń po teście
 };
 
 const BATCH_SIZE = 8;
@@ -42,10 +45,11 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchTwelveData(apiKey: string): Promise<PriceRow[]> {
+async function fetchTwelveData(apiKey: string): Promise<FetchResult> {
   const allSymbols = Object.keys(TWELVE_DATA_SYMBOLS);
   const batches = chunk(allSymbols, BATCH_SIZE);
   const rows: PriceRow[] = [];
+  const errors: string[] = [];
 
   console.log(`[TwelveData] Start — ${allSymbols.length} symboli w ${batches.length} batchach`);
 
@@ -57,44 +61,53 @@ async function fetchTwelveData(apiKey: string): Promise<PriceRow[]> {
 
     console.log(`[TwelveData] Batch ${i + 1}/${batches.length}: ${batches[i].join(", ")}`);
 
-    const url = new URL("https://api.twelvedata.com/price");
-    url.searchParams.set("symbol", batches[i].join(","));
-    url.searchParams.set("apikey", apiKey);
+    try {
+      const url = new URL("https://api.twelvedata.com/price");
+      url.searchParams.set("symbol", batches[i].join(","));
+      url.searchParams.set("apikey", apiKey);
 
-    const res = await fetch(url.toString());
-    console.log(`[TwelveData] Batch ${i + 1} HTTP status: ${res.status}`);
-    if (!res.ok) throw new Error(`Twelve Data error: ${res.status}`);
+      const res = await fetch(url.toString());
+      console.log(`[TwelveData] Batch ${i + 1} HTTP status: ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-    const data = await res.json();
-    const normalized: Record<string, { price?: string; code?: number }> =
-      batches[i].length === 1 ? { [batches[i][0]]: data } : data;
+      const data = await res.json();
+      const normalized: Record<string, { price?: string; code?: number; message?: string }> =
+        batches[i].length === 1 ? { [batches[i][0]]: data } : data;
 
-    let batchCount = 0;
-    for (const [symbol, val] of Object.entries(normalized)) {
-      if (TWELVE_DATA_SYMBOLS[symbol] && val.price != null && val.code == null) {
-        rows.push({
-          asset_id: TWELVE_DATA_SYMBOLS[symbol],
-          price_usd: parseFloat(val.price),
-          updated_at: new Date().toISOString(),
-        });
-        batchCount++;
-      } else if (val.code != null) {
-        console.warn(`[TwelveData] Pominięto ${symbol}: code=${val.code}`);
+      for (const [symbol, val] of Object.entries(normalized)) {
+        if (!TWELVE_DATA_SYMBOLS[symbol]) continue;
+        if (val.price != null && val.code == null) {
+          rows.push({
+            asset_id: TWELVE_DATA_SYMBOLS[symbol],
+            price_usd: parseFloat(val.price),
+            updated_at: new Date().toISOString(),
+          });
+        } else {
+          const msg = `TwelveData: ${symbol} — ${val.message ?? `code ${val.code}`}`;
+          console.warn(`[TwelveData] ⚠️ ${msg}`);
+          errors.push(msg);
+        }
       }
+      console.log(`[TwelveData] Batch ${i + 1} — OK: ${rows.length}, błędy: ${errors.length}`);
+    } catch (err) {
+      const msg = `TwelveData batch ${i + 1}: ${String(err)}`;
+      console.error(`[TwelveData] ❌ ${msg}`);
+      errors.push(msg);
     }
-    console.log(`[TwelveData] Batch ${i + 1} — pobrano ${batchCount} kursów`);
   }
 
-  console.log(`[TwelveData] Zakończono — łącznie ${rows.length} kursów`);
-  return rows;
+  console.log(`[TwelveData] Zakończono — ${rows.length} OK, ${errors.length} błędów`);
+  return { rows, errors };
 }
 
-async function fetchMetalsDev(apiKey: string): Promise<PriceRow[]> {
+async function fetchMetalsDev(apiKey: string): Promise<FetchResult> {
   const now = new Date().toISOString();
-  const metals = Object.keys(METALS_DEV_MAP);
-  console.log(`[MetalsDev] Start — metale: ${metals.join(", ")}`);
+  const rows: PriceRow[] = [];
+  const errors: string[] = [];
 
-  const results = await Promise.all(
+  console.log(`[MetalsDev] Start — metale: ${Object.keys(METALS_DEV_MAP).join(", ")}`);
+
+  const settled = await Promise.allSettled(
     Object.entries(METALS_DEV_MAP).map(async ([metal, asset_id]) => {
       const url = new URL("https://api.metals.dev/v1/metal/spot");
       url.searchParams.set("api_key", apiKey);
@@ -103,21 +116,32 @@ async function fetchMetalsDev(apiKey: string): Promise<PriceRow[]> {
 
       const res = await fetch(url.toString());
       console.log(`[MetalsDev] ${metal} HTTP status: ${res.status}`);
-      if (!res.ok) throw new Error(`Metals.Dev error for ${metal}: ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       const data = await res.json();
-      if (data.status !== "success") throw new Error(`Metals.Dev ${metal}: ${data.message}`);
+      if (data.status !== "success") throw new Error(data.message ?? "unknown error");
 
       console.log(`[MetalsDev] ${metal} (${asset_id}): $${data.rate.price}`);
       return { asset_id, price_usd: data.rate.price, updated_at: now };
     })
   );
 
-  console.log(`[MetalsDev] Zakończono — pobrano ${results.length} kursów`);
-  return results;
+  const metals = Object.keys(METALS_DEV_MAP);
+  settled.forEach((result, i) => {
+    if (result.status === "fulfilled") {
+      rows.push(result.value);
+    } else {
+      const msg = `MetalsDev: ${metals[i]} — ${result.reason}`;
+      console.warn(`[MetalsDev] ⚠️ ${msg}`);
+      errors.push(msg);
+    }
+  });
+
+  console.log(`[MetalsDev] Zakończono — ${rows.length} OK, ${errors.length} błędów`);
+  return { rows, errors };
 }
 
-async function sendErrorEmail(errorMsg: string): Promise<void> {
+async function sendAlertEmail(subject: string, body: string): Promise<void> {
   const resendKey = Deno.env.get("RESEND_API_KEY");
   const alertEmail = Deno.env.get("ALERT_EMAIL");
   if (!resendKey || !alertEmail) {
@@ -125,7 +149,7 @@ async function sendErrorEmail(errorMsg: string): Promise<void> {
     return;
   }
 
-  console.log(`[Email] Wysyłam alert na ${alertEmail}`);
+  console.log(`[Email] Wysyłam alert na ${alertEmail}: "${subject}"`);
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -135,12 +159,8 @@ async function sendErrorEmail(errorMsg: string): Promise<void> {
     body: JSON.stringify({
       from: "abundapp <onboarding@resend.dev>",
       to: alertEmail,
-      subject: "❌ abundapp: błąd fetch-prices",
-      html: `
-        <h2>Funkcja fetch-prices zakończyła się błędem</h2>
-        <p><strong>Czas:</strong> ${new Date().toISOString()}</p>
-        <pre style="background:#f4f4f4;padding:12px">${errorMsg}</pre>
-      `,
+      subject,
+      html: `<p><strong>Czas:</strong> ${new Date().toISOString()}</p><pre style="background:#f4f4f4;padding:12px">${body}</pre>`,
     }),
   });
   console.log(`[Email] Resend HTTP status: ${res.status}`);
@@ -150,17 +170,19 @@ async function writeLog(
   supabase: ReturnType<typeof createClient>,
   success: boolean,
   assetsUpdated: number | null,
-  errorMessage: string | null
+  errorMessage: string | null,
+  warnings: string | null
 ): Promise<void> {
   const { error } = await supabase.from("cron_logs").insert({
     success,
     assets_updated: assetsUpdated,
     error_message: errorMessage,
+    warnings,
   });
   if (error) {
     console.error(`[DB] Błąd zapisu do cron_logs: ${error.message}`);
   } else {
-    console.log(`[DB] cron_logs zapisany — success=${success}, assets_updated=${assetsUpdated}`);
+    console.log(`[DB] cron_logs — success=${success}, assets=${assetsUpdated}, warnings=${warnings ? "tak" : "nie"}`);
   }
 }
 
@@ -179,16 +201,17 @@ Deno.serve(async () => {
     const metalsApiKey = Deno.env.get("METALS_DEV_API_KEY");
     if (!metalsApiKey) throw new Error("Brak METALS_DEV_API_KEY");
 
-    const [twelveRows, metalRows] = await Promise.all([
+    const [twelveResult, metalsResult] = await Promise.all([
       fetchTwelveData(twelveApiKey),
       fetchMetalsDev(metalsApiKey),
     ]);
 
-    const allRows = [...twelveRows, ...metalRows];
+    const allRows = [...twelveResult.rows, ...metalsResult.rows];
+    const allErrors = [...twelveResult.errors, ...metalsResult.errors];
+
+    if (allRows.length === 0) throw new Error("Brak jakichkolwiek danych z obu źródeł");
+
     console.log(`[DB] Zapisuję ${allRows.length} kursów do price_cache...`);
-
-    if (allRows.length === 0) throw new Error("Brak danych z obu źródeł");
-
     const { error } = await supabase
       .from("price_cache")
       .upsert(allRows, { onConflict: "asset_id" });
@@ -196,11 +219,24 @@ Deno.serve(async () => {
     if (error) throw error;
     console.log(`[DB] price_cache zaktualizowany pomyślnie`);
 
-    await writeLog(supabase, true, allRows.length, null);
+    const warningsText = allErrors.length > 0 ? allErrors.join("\n") : null;
+
+    if (allErrors.length > 0) {
+      console.warn(`[PARTIAL] ${allErrors.length} tickerów nie udało się pobrać`);
+      await Promise.all([
+        writeLog(supabase, true, allRows.length, null, warningsText),
+        sendAlertEmail(
+          `⚠️ abundapp: partial success (${allRows.length} OK, ${allErrors.length} błędów)`,
+          `Pobrano ${allRows.length} z ${allRows.length + allErrors.length} aktywów.\n\nBłędy:\n${warningsText}`
+        ),
+      ]);
+    } else {
+      await writeLog(supabase, true, allRows.length, null, null);
+    }
 
     console.log("=== fetch-prices DONE ===");
     return new Response(
-      JSON.stringify({ success: true, updated: allRows.length, assets: allRows }),
+      JSON.stringify({ success: true, updated: allRows.length, warnings: allErrors, assets: allRows }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
   } catch (err) {
@@ -208,8 +244,8 @@ Deno.serve(async () => {
     console.error(`[ERROR] ${errorMsg}`);
 
     await Promise.all([
-      writeLog(supabase, false, null, errorMsg),
-      sendErrorEmail(errorMsg),
+      writeLog(supabase, false, null, errorMsg, null),
+      sendAlertEmail("❌ abundapp: błąd fetch-prices", errorMsg),
     ]);
 
     console.log("=== fetch-prices FAILED ===");
