@@ -181,6 +181,39 @@ Deno.serve(async () => {
     assert(status === 404, `Oczekiwano 404, dostałem ${status}`);
   }));
 
+  // ── /snapshot-dates ───────────────────────────────────────────────────────
+
+  results.push(await run("snapshot-dates: zwraca 200 z tablicą dates", async () => {
+    const { status, body } = await get(`snapshot-dates?user_id=${TEST_USER_ID}`);
+    assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
+    assert(Array.isArray((body as { dates: string[] }).dates), "dates nie jest tablicą");
+  }));
+
+  results.push(await run("snapshot-dates: po snapszotcie zawiera dzisiejszą datę", async () => {
+    const { body } = await get(`snapshot-dates?user_id=${TEST_USER_ID}`);
+    const dates = (body as { dates: string[] }).dates;
+    assert(dates.includes(TODAY), `Brak ${TODAY} w dates: [${dates.join(", ")}]`);
+  }));
+
+  results.push(await run("snapshot-dates: daty posortowane od najnowszej", async () => {
+    const { body } = await get(`snapshot-dates?user_id=${TEST_USER_ID}`);
+    const dates = (body as { dates: string[] }).dates;
+    for (let i = 1; i < dates.length; i++) {
+      assert(dates[i - 1] >= dates[i], `Daty nie są posortowane malejąco: ${dates[i - 1]} < ${dates[i]}`);
+    }
+  }));
+
+  results.push(await run("snapshot-dates: brak user_id → 400", async () => {
+    const { status } = await get("snapshot-dates");
+    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
+  }));
+
+  results.push(await run("snapshot-dates: nieistniejący user → pusta lista", async () => {
+    const { status, body } = await get("snapshot-dates?user_id=00000000-0000-0000-0000-000000000000");
+    assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
+    assert((body as { dates: string[] }).dates.length === 0, "Oczekiwano pustej tablicy dla nieznanego usera");
+  }));
+
   // ── Podsumowanie ──────────────────────────────────────────────────────────
 
   const passed = results.filter(r => r.passed).length;
