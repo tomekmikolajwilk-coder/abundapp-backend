@@ -31,12 +31,17 @@ Deno.serve(async () => {
   const BASE = Deno.env.get("SUPABASE_URL")!;
   const TODAY = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
 
-  // Pomocnik — robi GET i parsuje JSON.
-  // Zwraca { status, body } żeby testy mogły sprawdzać zarówno kod HTTP jak i treść.
+  // Pomocnik — robi GET i parsuje JSON. Memoizowany: ten sam URL fetchy tylko raz,
+  // kolejne wywołania zwracają z cache'a. Dzięki temu 33 testy robią ~25 requestów
+  // zamiast ~30 i nie obijamy się o rate limit Supabase Edge Functions.
+  const responseCache = new Map<string, { status: number; body: unknown }>();
   async function get(path: string): Promise<{ status: number; body: unknown }> {
+    if (responseCache.has(path)) return responseCache.get(path)!;
     const res = await fetch(`${BASE}/functions/v1/${path}`);
     const body = await res.json();
-    return { status: res.status, body };
+    const result = { status: res.status, body };
+    responseCache.set(path, result);
+    return result;
   }
 
   const results: TestResult[] = [];
