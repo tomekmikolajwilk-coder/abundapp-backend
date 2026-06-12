@@ -108,10 +108,11 @@ Deno.serve(async (req) => {
     );
   }
 
-  // ── LIVE: liczymy na bieżąco z profiles + price_cache ─────────────────────
-  const [profileResult, pricesResult] = await Promise.all([
+  // ── LIVE: liczymy na bieżąco z profiles + price_cache + asset_definitions ──
+  const [profileResult, pricesResult, defsResult] = await Promise.all([
     supabase.from("profiles").select("preferred_currency, holdings").eq("id", userId).single(),
-    supabase.from("price_cache").select("asset_id, price_usd, category"),
+    supabase.from("price_cache").select("asset_id, price_usd"),
+    supabase.from("asset_definitions").select("asset_id, category").eq("active", true),
   ]);
 
   if (profileResult.error || !profileResult.data) {
@@ -130,9 +131,15 @@ Deno.serve(async (req) => {
 
   const { preferred_currency, holdings } = profileResult.data;
 
+  // category pochodzi z asset_definitions — źródła prawdy
+  const categoryMap: Record<string, string> = {};
+  for (const d of defsResult.data ?? []) {
+    categoryMap[d.asset_id] = d.category;
+  }
+
   const priceMap: Record<string, { price_usd: number; category: string }> = {};
   for (const p of pricesResult.data) {
-    priceMap[p.asset_id] = { price_usd: p.price_usd, category: p.category };
+    priceMap[p.asset_id] = { price_usd: p.price_usd, category: categoryMap[p.asset_id] ?? "unknown" };
   }
 
   const ccyPrice = priceMap[preferred_currency]?.price_usd ?? null;

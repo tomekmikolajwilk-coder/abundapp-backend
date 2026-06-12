@@ -56,9 +56,10 @@ Deno.serve(async () => {
   );
 
   try {
-    const [pricesResult, profilesResult] = await Promise.all([
-      supabase.from("price_cache").select("asset_id, price_usd, category"),
+    const [pricesResult, profilesResult, defsResult] = await Promise.all([
+      supabase.from("price_cache").select("asset_id, price_usd"),
       supabase.from("profiles").select("id, preferred_currency, holdings"),
+      supabase.from("asset_definitions").select("asset_id, category").eq("active", true),
     ]);
 
     if (pricesResult.error || !pricesResult.data) {
@@ -73,9 +74,15 @@ Deno.serve(async () => {
 
     console.log(`[snapshot] ${profiles.length} users, ${prices.length} assets in price_cache`);
 
+    // category pochodzi z asset_definitions — źródła prawdy
+    const categoryMap: Record<string, string> = {};
+    for (const d of defsResult.data ?? []) {
+      categoryMap[d.asset_id] = d.category;
+    }
+
     const priceMap: Record<string, { price_usd: number; category: string }> = {};
     for (const p of prices) {
-      priceMap[p.asset_id] = { price_usd: p.price_usd, category: p.category };
+      priceMap[p.asset_id] = { price_usd: p.price_usd, category: categoryMap[p.asset_id] ?? "unknown" };
     }
 
     const now = new Date();

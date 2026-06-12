@@ -3,38 +3,10 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 type PriceRow = {
   asset_id: string;
   price_usd: number;
-  category: string;
   updated_at: string;
 };
 type FetchResult = { rows: PriceRow[]; errors: string[] };
-type SymbolDef = { asset_id: string; category: string };
-
-// Twelve Data: akcje, krypto, waluty
-const TWELVE_DATA_SYMBOLS: Record<string, SymbolDef> = {
-  "BTC/USD": { asset_id: "BTC", category: "crypto" },
-  "ETH/USD": { asset_id: "ETH", category: "crypto" },
-  "SOL/USD": { asset_id: "SOL", category: "crypto" },
-  "EUR/USD": { asset_id: "EUR", category: "currency" },
-  "GBP/USD": { asset_id: "GBP", category: "currency" },
-  "JPY/USD": { asset_id: "JPY", category: "currency" },
-  "CHF/USD": { asset_id: "CHF", category: "currency" },
-  "CAD/USD": { asset_id: "CAD", category: "currency" },
-  "PLN/USD": { asset_id: "PLN", category: "currency" },
-  "AAPL":    { asset_id: "AAPL", category: "stock" },
-  "MSFT":    { asset_id: "MSFT", category: "stock" },
-  "GOOGL":   { asset_id: "GOOGL", category: "stock" },
-  "AMZN":    { asset_id: "AMZN", category: "stock" },
-  "TSLA":    { asset_id: "TSLA", category: "stock" },
-  "NVDA":    { asset_id: "NVDA", category: "stock" },
-};
-
-// Metals.Dev: metale szlachetne
-const METALS_DEV_MAP: Record<string, SymbolDef> = {
-  gold:      { asset_id: "XAU", category: "metal" },
-  silver:    { asset_id: "XAG", category: "metal" },
-  platinum:  { asset_id: "XPT", category: "metal" },
-  palladium: { asset_id: "XPD", category: "metal" },
-};
+type SymbolDef = { asset_id: string };
 
 const BATCH_SIZE = 8;
 const BATCH_DELAY_MS = 61_000;
@@ -49,8 +21,43 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchTwelveData(apiKey: string): Promise<FetchResult> {
-  const allSymbols = Object.keys(TWELVE_DATA_SYMBOLS);
+// Ładuje definicje assetów z bazy — zamiast hardkodowanych stałych.
+// Dodanie nowego aktywa = insert do asset_definitions, bez zmiany kodu.
+async function loadAssetDefinitions(supabase: ReturnType<typeof createClient>): Promise<{
+  twelveDataSymbols: Record<string, SymbolDef>;
+  metalsDevMap: Record<string, SymbolDef>;
+}> {
+  const { data, error } = await supabase
+    .from("asset_definitions")
+    .select("asset_id, api_source, api_symbol")
+    .eq("active", true);
+
+  if (error || !data) throw new Error(`Failed to load asset definitions: ${error?.message}`);
+
+  const twelveDataSymbols: Record<string, SymbolDef> = {};
+  const metalsDevMap: Record<string, SymbolDef> = {};
+
+  for (const def of data) {
+    if (def.api_source === "twelve_data") {
+      twelveDataSymbols[def.api_symbol] = { asset_id: def.asset_id };
+    } else if (def.api_source === "metals_dev") {
+      metalsDevMap[def.api_symbol] = { asset_id: def.asset_id };
+    }
+  }
+
+  console.log(
+    `[definitions] Załadowano ${data.length} assetów ` +
+    `(${Object.keys(twelveDataSymbols).length} Twelve Data, ${Object.keys(metalsDevMap).length} Metals.Dev)`
+  );
+
+  return { twelveDataSymbols, metalsDevMap };
+}
+
+async function fetchTwelveData(
+  apiKey: string,
+  symbols: Record<string, SymbolDef>
+): Promise<FetchResult> {
+  const allSymbols = Object.keys(symbols);
   const batches = chunk(allSymbols, BATCH_SIZE);
   const rows: PriceRow[] = [];
   const errors: string[] = [];
@@ -79,13 +86,12 @@ async function fetchTwelveData(apiKey: string): Promise<FetchResult> {
         batches[i].length === 1 ? { [batches[i][0]]: data } : data;
 
       for (const [symbol, val] of Object.entries(normalized)) {
-        const def = TWELVE_DATA_SYMBOLS[symbol];
+        const def = symbols[symbol];
         if (!def) continue;
         if (val.price != null && val.code == null) {
           rows.push({
             asset_id: def.asset_id,
             price_usd: parseFloat(val.price),
-            category: def.category,
             updated_at: new Date().toISOString(),
           });
         } else {
@@ -106,15 +112,18 @@ async function fetchTwelveData(apiKey: string): Promise<FetchResult> {
   return { rows, errors };
 }
 
-async function fetchMetalsDev(apiKey: string): Promise<FetchResult> {
+async function fetchMetalsDev(
+  apiKey: string,
+  metalsMap: Record<string, SymbolDef>
+): Promise<FetchResult> {
   const rows: PriceRow[] = [];
   const errors: string[] = [];
   const now = new Date().toISOString();
 
-  console.log(`[MetalsDev] Start — metale: ${Object.keys(METALS_DEV_MAP).join(", ")}`);
+  console.log(`[MetalsDev] Start — metale: ${Object.keys(metalsMap).join(", ")}`);
 
   const settled = await Promise.allSettled(
-    Object.entries(METALS_DEV_MAP).map(async ([metal, def]) => {
+    Object.entries(metalsMap).map(async ([metal, def]) => {
       const url = new URL("https://api.metals.dev/v1/metal/spot");
       url.searchParams.set("api_key", apiKey);
       url.searchParams.set("metal", metal);
@@ -131,13 +140,12 @@ async function fetchMetalsDev(apiKey: string): Promise<FetchResult> {
       return {
         asset_id: def.asset_id,
         price_usd: data.rate.price,
-        category: def.category,
         updated_at: now,
       };
     })
   );
 
-  const metals = Object.keys(METALS_DEV_MAP);
+  const metals = Object.keys(metalsMap);
   settled.forEach((result, i) => {
     if (result.status === "fulfilled") {
       rows.push(result.value);
@@ -159,7 +167,6 @@ async function sendAlertEmail(subject: string, body: string): Promise<void> {
     console.warn("[Email] Brak RESEND_API_KEY lub ALERT_EMAIL — pomijam wysyłkę");
     return;
   }
-
   console.log(`[Email] Wysyłam alert na ${alertEmail}: "${subject}"`);
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -194,7 +201,7 @@ async function writeLog(
   if (error) {
     console.error(`[DB] Błąd zapisu do cron_logs: ${error.message}`);
   } else {
-    console.log(`[DB] cron_logs — success=${success}, assets=${assetsUpdated}, warnings=${warnings ? "tak" : "nie"}`);
+    console.log(`[DB] cron_logs — success=${success}, assets=${assetsUpdated}`);
   }
 }
 
@@ -213,9 +220,11 @@ Deno.serve(async () => {
     const metalsApiKey = Deno.env.get("METALS_DEV_API_KEY");
     if (!metalsApiKey) throw new Error("Brak METALS_DEV_API_KEY");
 
+    const { twelveDataSymbols, metalsDevMap } = await loadAssetDefinitions(supabase);
+
     const [twelveResult, metalsResult] = await Promise.all([
-      fetchTwelveData(twelveApiKey),
-      fetchMetalsDev(metalsApiKey),
+      fetchTwelveData(twelveApiKey, twelveDataSymbols),
+      fetchMetalsDev(metalsApiKey, metalsDevMap),
     ]);
 
     const allRows = [...twelveResult.rows, ...metalsResult.rows];

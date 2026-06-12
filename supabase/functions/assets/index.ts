@@ -10,29 +10,47 @@ Deno.serve(async () => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   );
 
-  const { data, error } = await supabase
-    .from("price_cache")
-    .select("asset_id, price_usd, category, updated_at")
-    .order("asset_id");
+  // Pobieramy ceny i definicje równolegle.
+  // asset_definitions jest źródłem prawdy dla category i display_name.
+  // price_cache zawiera tylko asset_id, price_usd, updated_at.
+  const [pricesResult, defsResult] = await Promise.all([
+    supabase.from("price_cache").select("asset_id, price_usd, updated_at").order("asset_id"),
+    supabase.from("asset_definitions").select("asset_id, category, display_name").eq("active", true),
+  ]);
 
-  if (error) {
-    console.error(`[assets] DB error: ${error.message}`);
-    return new Response(JSON.stringify({ error: error.message }), {
+  if (pricesResult.error || defsResult.error) {
+    const msg = pricesResult.error?.message ?? defsResult.error?.message;
+    console.error(`[assets] DB error: ${msg}`);
+    return new Response(JSON.stringify({ error: msg }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
     });
   }
 
-  // Grupujemy po kategorii żeby frontend mógł łatwo renderować osobne sekcje
-  // (np. "Krypto", "Akcje", "Metale", "Waluty") bez dodatkowej logiki po swojej stronie.
-  const grouped: Record<string, typeof data> = {};
-  for (const row of data ?? []) {
-    if (!grouped[row.category]) grouped[row.category] = [];
-    grouped[row.category].push(row);
+  // Budujemy lookup asset_id → { category, display_name }
+  const defMap: Record<string, { category: string; display_name: string }> = {};
+  for (const def of defsResult.data ?? []) {
+    defMap[def.asset_id] = { category: def.category, display_name: def.display_name };
+  }
+
+  // Grupujemy po kategorii i wzbogacamy o display_name
+  const grouped: Record<string, unknown[]> = {};
+  for (const row of pricesResult.data ?? []) {
+    const def = defMap[row.asset_id];
+    if (!def) continue; // asset w price_cache ale nie ma go w asset_definitions — pomijamy
+
+    if (!grouped[def.category]) grouped[def.category] = [];
+    grouped[def.category].push({
+      asset_id: row.asset_id,
+      display_name: def.display_name,
+      price_usd: row.price_usd,
+      category: def.category,
+      updated_at: row.updated_at,
+    });
   }
 
   console.log(
-    `[assets] Returning ${data?.length ?? 0} assets in categories: ${Object.keys(grouped).join(", ")}`
+    `[assets] Returning ${pricesResult.data?.length ?? 0} assets in categories: ${Object.keys(grouped).join(", ")}`
   );
   console.log("=== assets DONE ===");
 
