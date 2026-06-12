@@ -35,23 +35,22 @@ Deno.serve(async (req) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   );
 
-  // Jeśli podano ?currency=X — pobieramy aktualny kurs żeby wyliczyć value_selected.
+  // Jeśli podano ?currency=X — walidujemy kategorię przez asset_definitions,
+  // kurs pobieramy z price_cache.
   let selectedCurrencyPrice: number | null = null;
   if (currencyParam) {
-    const { data: ccyRow, error: ccyErr } = await supabase
-      .from("price_cache")
-      .select("price_usd")
-      .eq("asset_id", currencyParam)
-      .eq("category", "currency")
-      .single();
+    const [defResult, priceResult] = await Promise.all([
+      supabase.from("asset_definitions").select("asset_id").eq("asset_id", currencyParam).eq("category", "currency").eq("active", true).single(),
+      supabase.from("price_cache").select("price_usd").eq("asset_id", currencyParam).single(),
+    ]);
 
-    if (ccyErr || !ccyRow) {
+    if (defResult.error || !defResult.data || priceResult.error || !priceResult.data) {
       return new Response(
-        JSON.stringify({ error: `Currency ${currencyParam} not found in price_cache` }),
+        JSON.stringify({ error: `Currency ${currencyParam} not found` }),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
-    selectedCurrencyPrice = ccyRow.price_usd;
+    selectedCurrencyPrice = priceResult.data.price_usd;
   }
 
   // Szukamy najnowszego snapshotu z wizyty usera.
