@@ -214,6 +214,82 @@ Deno.serve(async () => {
     assert((body as { dates: string[] }).dates.length === 0, "Oczekiwano pustej tablicy dla nieznanego usera");
   }));
 
+  // ── /value-history ───────────────────────────────────────────────────────
+
+  results.push(await run("value-history: zwraca 200 z currency=PLN i tablicą points", async () => {
+    const { status, body } = await get(`value-history?user_id=${TEST_USER_ID}`);
+    assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
+    assert((body as { currency: string }).currency === "PLN", "Oczekiwano currency=PLN");
+    assert(Array.isArray((body as { points: unknown[] }).points), "points nie jest tablicą");
+  }));
+
+  results.push(await run("value-history: ma >= 160 punktów (syntetyczne dane od 1 stycznia)", async () => {
+    const { body } = await get(`value-history?user_id=${TEST_USER_ID}`);
+    const len = (body as { points: unknown[] }).points.length;
+    assert(len >= 160, `Oczekiwano >= 160 punktów, dostałem ${len}`);
+  }));
+
+  results.push(await run("value-history: punkty posortowane chronologicznie", async () => {
+    const { body } = await get(`value-history?user_id=${TEST_USER_ID}`);
+    const points = (body as { points: { date: string }[] }).points;
+    for (let i = 1; i < points.length; i++) {
+      assert(points[i - 1].date <= points[i].date,
+        `Daty nie rosnące: ${points[i - 1].date} > ${points[i].date}`);
+    }
+  }));
+
+  results.push(await run("value-history ?category=crypto: points mają wartość < całości portfela", async () => {
+    const [{ body: total }, { body: crypto }] = await Promise.all([
+      get(`value-history?user_id=${TEST_USER_ID}`),
+      get(`value-history?user_id=${TEST_USER_ID}&category=crypto`),
+    ]);
+    const totalVal = ((total as { points: { value: number }[] }).points[0]?.value ?? 0);
+    const cryptoVal = ((crypto as { points: { value: number }[] }).points[0]?.value ?? 0);
+    assert(cryptoVal > 0, "Oczekiwano > 0 dla crypto");
+    assert(cryptoVal < totalVal, `crypto value (${cryptoVal}) powinno być < total (${totalVal})`);
+  }));
+
+  results.push(await run("value-history ?asset_id=BTC: tylko BTC w każdym punkcie", async () => {
+    const { body } = await get(`value-history?user_id=${TEST_USER_ID}&asset_id=BTC`);
+    const points = (body as { points: { value: number }[] }).points;
+    assert(points.length >= 160, `Oczekiwano >= 160 punktów dla BTC, dostałem ${points.length}`);
+    assert(points[0].value > 0, "Oczekiwano value > 0 dla BTC");
+  }));
+
+  results.push(await run("value-history ?currency=EUR: każdy punkt ma value_selected", async () => {
+    const { body } = await get(`value-history?user_id=${TEST_USER_ID}&currency=EUR`);
+    const points = (body as { points: { value: number; value_selected?: number }[] }).points;
+    for (const p of points) {
+      assert(p.value_selected !== undefined, `Brak value_selected dla daty ${(p as unknown as { date: string }).date}`);
+      assert(p.value_selected! > 0, "value_selected <= 0");
+    }
+  }));
+
+  results.push(await run("value-history ?from=&to=: filtrowanie zakresu dat", async () => {
+    const { body } = await get(`value-history?user_id=${TEST_USER_ID}&from=2026-01-01&to=2026-01-31`);
+    const points = (body as { points: { date: string }[] }).points;
+    assert(points.length > 0, "Oczekiwano punktów w zakresie");
+    for (const p of points) {
+      assert(p.date >= "2026-01-01" && p.date <= "2026-01-31",
+        `Data ${p.date} poza zakresem 2026-01-01 – 2026-01-31`);
+    }
+  }));
+
+  results.push(await run("value-history: brak user_id → 400", async () => {
+    const { status } = await get("value-history");
+    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
+  }));
+
+  results.push(await run("value-history: nieistniejący user → 404", async () => {
+    const { status } = await get("value-history?user_id=00000000-0000-0000-0000-000000000000");
+    assert(status === 404, `Oczekiwano 404, dostałem ${status}`);
+  }));
+
+  results.push(await run("value-history: currency=BTC (nie waluta) → 400", async () => {
+    const { status } = await get(`value-history?user_id=${TEST_USER_ID}&currency=BTC`);
+    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
+  }));
+
   // ── Podsumowanie ──────────────────────────────────────────────────────────
 
   const passed = results.filter(r => r.passed).length;
