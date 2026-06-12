@@ -243,10 +243,10 @@ Deno.serve(async () => {
     }
   }));
 
-  results.push(await run("value-history ?category=crypto: points mają wartość < całości portfela", async () => {
+  results.push(await run("value-history ?category_id=crypto: points mają wartość < całości portfela", async () => {
     const [{ body: total }, { body: crypto }] = await Promise.all([
       get(`value-history?user_id=${TEST_USER_ID}`),
-      get(`value-history?user_id=${TEST_USER_ID}&category=crypto`),
+      get(`value-history?user_id=${TEST_USER_ID}&category_id=crypto`),
     ]);
     const totalVal = ((total as { points: { value: number }[] }).points[0]?.value ?? 0);
     const cryptoVal = ((crypto as { points: { value: number }[] }).points[0]?.value ?? 0);

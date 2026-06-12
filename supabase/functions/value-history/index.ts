@@ -16,7 +16,7 @@ type Point = {
 };
 
 // GET /value-history?user_id=UUID
-// GET /value-history?user_id=UUID&category=crypto      → tylko aktywa z tej kategorii
+// GET /value-history?user_id=UUID&category_id=crypto   → tylko aktywa z tej kategorii
 // GET /value-history?user_id=UUID&asset_id=BTC         → tylko konkretny asset
 // GET /value-history?user_id=UUID&currency=EUR         → dodaje value_selected per punkt
 // GET /value-history?user_id=UUID&from=2026-01-01&to=2026-03-31
@@ -29,7 +29,7 @@ Deno.serve(async (req) => {
 
   const url = new URL(req.url);
   const userId = url.searchParams.get("user_id");
-  const categoryParam = url.searchParams.get("category");
+  const categoryParam = url.searchParams.get("category_id");
   const assetIdParam = url.searchParams.get("asset_id");
   const currencyParam = url.searchParams.get("currency")?.toUpperCase() ?? null;
   const fromParam = url.searchParams.get("from");
