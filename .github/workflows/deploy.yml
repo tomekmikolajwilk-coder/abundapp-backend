@@ -6,8 +6,19 @@ on:
       - main
 
 jobs:
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+      - name: Run unit tests (czysta logika fetch-prices)
+        run: deno test supabase/functions/fetch-prices/
+
   deploy:
     runs-on: ubuntu-latest
+    needs: unit-test  # nie deployuj jeśli logika nie przechodzi testów
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
