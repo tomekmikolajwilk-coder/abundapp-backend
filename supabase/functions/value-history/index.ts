@@ -1,6 +1,7 @@
 import { getServiceClient } from "../_shared/supabase.ts";
 import { badRequest, json, notFound, serverError } from "../_shared/http.ts";
 import { resolveSelectedCurrency } from "../_shared/currency.ts";
+import { resolveUserId } from "../_shared/auth.ts";
 import type { HoldingEntry } from "../_shared/types.ts";
 
 type Point = {
@@ -22,7 +23,7 @@ Deno.serve(async (req) => {
   console.log("=== value-history START ===");
 
   const url = new URL(req.url);
-  const userId = url.searchParams.get("user_id");
+  const userId = resolveUserId(req, url);
   const categoryParam = url.searchParams.get("category_id");
   const assetIdParam = url.searchParams.get("asset_id");
   const currencyParam = url.searchParams.get("currency")?.toUpperCase() ?? null;

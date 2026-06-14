@@ -31,5 +31,36 @@ enable_refresh_token_rotation = true
 [edge_runtime]
 enabled = true
 
+# ── Edge Functions: bramka JWT per-funkcja ──────────────────────────────────
+# Domyślnie Supabase ustawia verify_jwt=true. Deploy bez flagi --no-verify-jwt
+# respektuje poniższe wpisy. Endpointy per-user wymagają JWT (user_id z `sub`),
+# funkcje cron + smoke-test zostają publiczne (woła je pg_cron / CI bez tokena usera).
+[functions.portfolio]
+verify_jwt = true
+
+[functions.last-visit]
+verify_jwt = true
+
+[functions.assets]
+verify_jwt = true
+
+[functions.snapshot-dates]
+verify_jwt = true
+
+[functions.value-history]
+verify_jwt = true
+
+[functions.fetch-prices]
+verify_jwt = false
+
+[functions.fetch-metals]
+verify_jwt = false
+
+[functions.snapshot-portfolio]
+verify_jwt = false
+
+[functions.smoke-test]
+verify_jwt = false
+
 [analytics]
 enabled = false

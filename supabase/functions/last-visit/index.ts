@@ -1,6 +1,7 @@
 import { getServiceClient } from "../_shared/supabase.ts";
 import { badRequest, json, notFound } from "../_shared/http.ts";
 import { resolveSelectedCurrency } from "../_shared/currency.ts";
+import { resolveUserId } from "../_shared/auth.ts";
 import type { HoldingEntry } from "../_shared/types.ts";
 
 // GET /last-visit?user_id=UUID
@@ -13,7 +14,7 @@ Deno.serve(async (req) => {
   console.log("=== last-visit START ===");
 
   const url = new URL(req.url);
-  const userId = url.searchParams.get("user_id");
+  const userId = resolveUserId(req, url);
   const currencyParam = url.searchParams.get("currency")?.toUpperCase() ?? null;
 
   if (!userId) return badRequest("Missing user_id");

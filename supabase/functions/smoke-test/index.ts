@@ -29,7 +29,14 @@ function assert(condition: boolean, message: string): void {
 
 Deno.serve(async () => {
   const BASE = Deno.env.get("SUPABASE_URL")!;
+  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   const TODAY = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+
+  // Endpointy per-user mają verify_jwt=true — bramka odrzuca brak tokena (401).
+  // Wysyłamy service_role jako Bearer: jest poprawnym JWT (przechodzi bramkę), ale
+  // ma role=service_role bez `sub`, więc funkcje spadają na fallback ?user_id= z URL.
+  // Dzięki temu smoke-test wciąż weryfikuje ścieżkę query-param.
+  const AUTH_HEADERS = { Authorization: `Bearer ${SERVICE_KEY}`, apikey: SERVICE_KEY };
 
   // Pomocnik — robi GET i parsuje JSON. Memoizowany: ten sam URL fetchy tylko raz,
   // kolejne wywołania zwracają z cache'a. Dzięki temu 33 testy robią ~25 requestów
@@ -37,7 +44,7 @@ Deno.serve(async () => {
   const responseCache = new Map<string, { status: number; body: unknown }>();
   async function get(path: string): Promise<{ status: number; body: unknown }> {
     if (responseCache.has(path)) return responseCache.get(path)!;
-    const res = await fetch(`${BASE}/functions/v1/${path}`);
+    const res = await fetch(`${BASE}/functions/v1/${path}`, { headers: AUTH_HEADERS });
     const body = await res.json();
     const result = { status: res.status, body };
     responseCache.set(path, result);

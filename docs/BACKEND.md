@@ -229,7 +229,8 @@ Przykład: REIT = `category 'real_estate'` + `api_source 'twelve_data'`; fizyczn
 ## 6. Edge Functions — endpointy publiczne
 
 Base: `https://mrcjjyaljautuylpsssp.supabase.co/functions/v1`
-Auth: brak na razie (`--no-verify-jwt`), `user_id` jako query param (tymczasowo, patrz §11).
+Auth: **wymagany JWT** (Bearer zalogowanego usera) — `user_id` brany z claim `sub`.
+Query param `?user_id=` zostaje jako fallback na czas przejścia (patrz §11).
 
 ### `GET /assets`
 Wszystkie aktywne aktywa z aktualnym kursem, pogrupowane po kategorii.
@@ -371,9 +372,18 @@ Kształt błędu: `{ "error": "opis" }`. Funkcje cron zwracają na błędzie `{ 
 
 ## 11. Auth — stan i plan
 
-- **Teraz (dev):** funkcje deployowane z `--no-verify-jwt`, `user_id` przekazywany jako query param.
-- **Plan:** walidacja JWT we wszystkich Edge Functions — `user_id` brany z tokena zamiast z query.
-  Dodajemy gdy Flutter będzie gotowy do połączenia.
+- **Teraz:** endpointy per-user (`portfolio`, `last-visit`, `assets`, `snapshot-dates`,
+  `value-history`) mają **`verify_jwt = true`** (config.toml). Bramka Supabase weryfikuje
+  podpis tokena, funkcja czyta `user_id` z claim `sub` (helper `_shared/auth.ts`).
+- **user_id wg roli tokena** (helper `resolveUserId`): token `authenticated` → `user_id`
+  tylko z `sub` (query param **ignorowany** — nie da się podać cudzego id); token
+  `service_role` (sekretny, serwerowy) → dozwolony fallback `?user_id=`; `anon`/brak
+  tokena → brak dostępu. Anon key jest publiczny, więc **nie** może czytać danych per-user.
+- **Funkcje cron + `smoke-test`:** `verify_jwt = false` (woła je pg_cron / CI bez tokena
+  usera). Deploy bez flagi `--no-verify-jwt` — bramka sterowana per-funkcja z `config.toml`.
+- **Nowy user bez danych:** profil zakładany automatycznie triggerem `on_auth_user_created`
+  przy rejestracji (pusty `holdings` → `portfolio` zwraca `holdings_breakdown: []`, nie 404).
+  `last-visit` bez wizyt → 404 (oczekiwane, frontend to obsługuje).
 
 ---
 

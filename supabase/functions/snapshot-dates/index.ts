@@ -1,5 +1,6 @@
 import { getServiceClient } from "../_shared/supabase.ts";
 import { badRequest, json, serverError } from "../_shared/http.ts";
+import { resolveUserId } from "../_shared/auth.ts";
 
 // GET /snapshot-dates?user_id=UUID
 //
@@ -8,7 +9,7 @@ import { badRequest, json, serverError } from "../_shared/http.ts";
 // Jeśli brak snapshotu z danej daty — opcja nie jest wyświetlana.
 Deno.serve(async (req) => {
   const url = new URL(req.url);
-  const userId = url.searchParams.get("user_id");
+  const userId = resolveUserId(req, url);
 
   if (!userId) return badRequest("Missing user_id");
 
