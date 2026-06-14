@@ -22,7 +22,7 @@ endpointów, tabel, cronów lub workflow.
 10. [Kody błędów](#10-kody-błędów)
 11. [Auth — stan i plan](#11-auth--stan-i-plan)
 12. [Testowy user](#12-testowy-user)
-13. [TODO / zaparkowane](#13-todo--zaparkowane)
+13. [Koszty — płatne API, biblioteki i plany](#13-koszty--płatne-api-biblioteki-i-plany)
 
 ---
 
@@ -387,16 +387,36 @@ Kształt błędu: `{ "error": "opis" }`. Funkcje cron zwracają na błędzie `{ 
 
 ---
 
-## 13. TODO / zaparkowane
+## 13. Koszty — płatne API, biblioteki i plany
 
-- [ ] **Usunąć assety-pułapki** `TESTBAD` (twelve_data) + `TESTMETAL` (metals_dev) z migracji 016 —
-      wstawione tylko do weryfikacji ścieżki maili błędów; skasować po potwierdzeniu, że oba maile doszły.
-- [ ] **Auth / JWT** — walidacja tokena w Edge Functions (patrz §11).
-- [ ] **WTI (ropa)** — Twelve Data nie obsługuje na free tierze, dodać później.
-- [ ] **Czyszczenie `cron_logs`** — przy 100 wierszach/dobę warto retencję (zaparkowane).
-- [ ] **Custom assets (manualna cena)** — aktywa bez API (obligacje detaliczne EDO/COI,
-      nieruchomości, sztuka). Gotowy design: osobna tabela per-user
-      `custom_assets(id, user_id, display_name, category, amount, price, price_currency, updated_at)`;
-      trzymać `price` + `price_currency` natywnie (przeliczać na USD bieżącym kursem FX);
-      `/portfolio` merge'uje oba źródła z polami `price_source` + `price_updated_at`;
-      osobny endpoint `/custom-assets` (GET/POST/PATCH); `/assets` ich nie pokazuje (są osobiste).
+Stan na **2026-06-14**. Wszystko obecnie na **darmowych tierach** — zero realnych kosztów.
+Kwoty orientacyjne; przed upgradem sprawdź aktualny cennik dostawcy.
+
+### Supabase — baza + auth + Edge Functions + cron
+- **Plan teraz:** Free.
+- **Limity free:** ~500 MB DB, ~500 tys. wywołań Edge Functions/mies., projekt **pauzuje po 7 dniach bezczynności**.
+- **Kiedy upgrade → Pro (~$25/mies.):** produkcja (brak pauzowania), przekroczenie DB/transferu, backupy, więcej wywołań funkcji.
+
+### Twelve Data — krypto, akcje, ETF, forex
+- **Plan teraz:** Free (8 credits/min, 800 credits/dobę, **tylko rynki US**).
+- **Zużycie dziś:** 8 assetów × 96 wywołań/dobę = 768 < 800 — mieścimy się z zapasem.
+- **Kiedy upgrade (płatny od ~$29/mies.):**
+  - dane giełd EU (XETRA/LSE) → odblokowanie VWCE, IWDA, CSPX, AGGH (dziś `active=false`);
+  - więcej assetów lub częstsze odświeżanie (próg 800/dobę);
+  - wyższy rate limit niż 8/min.
+
+### Metals.Dev — metale (XAU, XAG, XPT, XPD)
+- **Plan teraz:** Free (**100 req/miesiąc**).
+- **Zużycie dziś:** 4 metale co 2 dni ≈ 60 req/mies. < 100.
+- **Kiedy upgrade:** więcej metali, częstszy cron lub dojście do limitu 100/mies.
+
+### Resend — alerty mailowe (awarie cronów)
+- **Plan teraz:** Free (100 maili/dobę, 3000/mies., 1 domena; nadawca `onboarding@resend.dev`).
+- **Kiedy upgrade (~$20/mies.):** własna domena nadawcza, większy wolumen maili.
+
+### Biblioteki frontendu (Flutter — osobne repo)
+- **Wykresy:** _(do uzupełnienia — biblioteka żyje w repo Flutter)_ — sprawdzić licencję/koszt.
+- `supabase_flutter` — oficjalny klient Supabase, open-source, darmowy.
+
+> Backend (to repo) sam w sobie nie ciągnie płatnych bibliotek — wszystkie zależności
+> Edge Functions (`supabase-js`, Deno std) są darmowe i open-source.
