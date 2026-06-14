@@ -69,10 +69,10 @@ Deno.serve(async () => {
     assert((body as { currency: string }).currency === "PLN", "Oczekiwano currency=PLN");
   }));
 
-  results.push(await run("portfolio live: ma 8 pozycji w holdings_breakdown", async () => {
+  results.push(await run("portfolio live: ma 10 pozycji w holdings_breakdown", async () => {
     const { body } = await get(`portfolio?user_id=${TEST_USER_ID}`);
     const len = (body as { holdings_breakdown: unknown[] }).holdings_breakdown.length;
-    assert(len === 8, `Oczekiwano 8 pozycji, dostałem ${len}`);
+    assert(len === 10, `Oczekiwano 10 pozycji, dostałem ${len}`);
   }));
 
   results.push(await run("portfolio live: value_usd = amount * price_usd dla każdej pozycji", async () => {
