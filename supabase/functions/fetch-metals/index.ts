@@ -1,20 +1,14 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { getServiceClient, type Supa } from "../_shared/supabase.ts";
+import { json } from "../_shared/http.ts";
+import { sendAlertEmail, writeCronLog } from "../_shared/alerts.ts";
+import type { PriceRow } from "../_shared/types.ts";
 
 // Osobna funkcja dla metali, bo Metals.Dev ma limit 100 req/MIESIĄC — nie może jechać
 // w 15-minutowej rotacji fetch-prices. Tu własny wolny cron (co 2 dni) i własny tor alertów:
 // awaria metalu = mail od razu (przy cyklu co 2 dni nie ma ryzyka spamu, a licznik "3/dobę"
 // z damaged_assets tu nie ma sensu — byłaby najwyżej 1 próba na 2 dni).
 
-type PriceRow = { asset_id: string; price_usd: number; updated_at: string };
 type MetalDef = { asset_id: string; api_symbol: string };
-
-function getClient() {
-  return createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-  );
-}
-type Supa = ReturnType<typeof getClient>;
 
 async function loadMetals(supabase: Supa): Promise<MetalDef[]> {
   const { data, error } = await supabase
@@ -63,47 +57,9 @@ async function fetchMetalsDev(
   return { rows, errors };
 }
 
-async function sendAlertEmail(subject: string, body: string): Promise<void> {
-  const resendKey = Deno.env.get("RESEND_API_KEY");
-  const alertEmail = Deno.env.get("ALERT_EMAIL");
-  if (!resendKey || !alertEmail) {
-    console.warn("[Email] Brak RESEND_API_KEY lub ALERT_EMAIL — pomijam wysyłkę");
-    return;
-  }
-  console.log(`[Email] Wysyłam alert na ${alertEmail}: "${subject}"`);
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${resendKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from: "abundapp <onboarding@resend.dev>",
-      to: alertEmail,
-      subject,
-      html: `<p><strong>Czas:</strong> ${new Date().toISOString()}</p><pre style="background:#f4f4f4;padding:12px;line-height:2">${body.split("\n").join("<br>")}</pre>`,
-    }),
-  });
-  console.log(`[Email] Resend HTTP ${res.status}`);
-}
-
-async function writeLog(
-  supabase: Supa,
-  success: boolean,
-  itemsProcessed: number | null,
-  errorMessage: string | null,
-  warnings: string | null,
-): Promise<void> {
-  const { error } = await supabase.from("cron_logs").insert({
-    function_name: "fetch-metals",
-    success,
-    items_processed: itemsProcessed,
-    error_message: errorMessage,
-    warnings,
-  });
-  if (error) console.error(`[DB] Błąd zapisu cron_logs: ${error.message}`);
-}
-
 Deno.serve(async () => {
   console.log("=== fetch-metals START ===");
-  const supabase = getClient();
+  const supabase = getServiceClient();
 
   try {
     const metalsApiKey = Deno.env.get("METALS_DEV_API_KEY");
@@ -123,38 +79,32 @@ Deno.serve(async () => {
     if (errors.length > 0 && rows.length === 0) {
       // Totalna porażka — żaden metal się nie pobrał.
       await Promise.all([
-        writeLog(supabase, false, 0, "Nie pobrano żadnego metalu", warningsText),
+        writeCronLog(supabase, "fetch-metals", { success: false, itemsProcessed: 0, errorMessage: "Nie pobrano żadnego metalu", warnings: warningsText }),
         sendAlertEmail("❌ abundapp: błąd fetch-metals (0 metali)", warningsText ?? "—"),
       ]);
     } else if (errors.length > 0) {
       // Część metali padła — mail od razu (cykl co 2 dni, brak spamu).
       await Promise.all([
-        writeLog(supabase, true, rows.length, null, warningsText),
+        writeCronLog(supabase, "fetch-metals", { success: true, itemsProcessed: rows.length, errorMessage: null, warnings: warningsText }),
         sendAlertEmail(
           `⚠️ abundapp: błąd pobierania metali (${errors.length})`,
           `Metale, których nie udało się pobrać:\n${warningsText}`,
         ),
       ]);
     } else {
-      await writeLog(supabase, true, rows.length, null, null);
+      await writeCronLog(supabase, "fetch-metals", { success: true, itemsProcessed: rows.length, errorMessage: null, warnings: null });
     }
 
     console.log("=== fetch-metals DONE ===");
-    return new Response(
-      JSON.stringify({ success: true, updated: rows.length, warnings: errors }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    return json({ success: true, updated: rows.length, warnings: errors });
   } catch (err) {
     const errorMsg = String(err);
     console.error(`[ERROR] ${errorMsg}`);
     await Promise.all([
-      writeLog(supabase, false, null, errorMsg, null),
+      writeCronLog(supabase, "fetch-metals", { success: false, itemsProcessed: null, errorMessage: errorMsg, warnings: null }),
       sendAlertEmail("❌ abundapp: błąd fetch-metals", errorMsg),
     ]);
     console.log("=== fetch-metals FAILED ===");
-    return new Response(
-      JSON.stringify({ success: false, error: errorMsg }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return json({ success: false, error: errorMsg }, 500);
   }
 });

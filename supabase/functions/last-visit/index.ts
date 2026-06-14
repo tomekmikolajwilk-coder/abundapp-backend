@@ -1,14 +1,7 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
-
-type HoldingEntry = {
-  asset_id: string;
-  category: string;
-  amount: number;
-  price_usd: number;
-  value_usd: number;
-  value_ccy: number;
-  value_selected?: number;
-};
+import { getServiceClient } from "../_shared/supabase.ts";
+import { badRequest, json, notFound } from "../_shared/http.ts";
+import { resolveSelectedCurrency } from "../_shared/currency.ts";
+import type { HoldingEntry } from "../_shared/types.ts";
 
 // GET /last-visit?user_id=UUID
 // GET /last-visit?user_id=UUID&currency=EUR
@@ -23,35 +16,14 @@ Deno.serve(async (req) => {
   const userId = url.searchParams.get("user_id");
   const currencyParam = url.searchParams.get("currency")?.toUpperCase() ?? null;
 
-  if (!userId) {
-    return new Response(JSON.stringify({ error: "Missing user_id" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (!userId) return badRequest("Missing user_id");
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+  const supabase = getServiceClient();
 
-  // Jeśli podano ?currency=X — walidujemy kategorię przez asset_definitions,
-  // kurs pobieramy z price_cache.
-  let selectedCurrencyPrice: number | null = null;
-  if (currencyParam) {
-    const [defResult, priceResult] = await Promise.all([
-      supabase.from("asset_definitions").select("asset_id").eq("asset_id", currencyParam).eq("category", "currency").eq("active", true).single(),
-      supabase.from("price_cache").select("price_usd").eq("asset_id", currencyParam).single(),
-    ]);
-
-    if (defResult.error || !defResult.data || priceResult.error || !priceResult.data) {
-      return new Response(
-        JSON.stringify({ error: `Currency ${currencyParam} not found` }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-    selectedCurrencyPrice = priceResult.data.price_usd;
-  }
+  // Walidacja ?currency=X — musi być aktywną walutą; zwraca kurs USD lub null.
+  const selected = await resolveSelectedCurrency(supabase, currencyParam);
+  if (!selected.ok) return selected.error;
+  const selectedCurrencyPrice = selected.price;
 
   // Szukamy najnowszego snapshotu z wizyty usera.
   const { data: snapshot, error: snapErr } = await supabase
@@ -64,10 +36,7 @@ Deno.serve(async (req) => {
     .single();
 
   if (snapErr || !snapshot) {
-    return new Response(
-      JSON.stringify({ error: "No visit snapshot found — user has not opened the app yet" }),
-      { status: 404, headers: { "Content-Type": "application/json" } }
-    );
+    return notFound("No visit snapshot found — user has not opened the app yet");
   }
 
   let holdings = snapshot.holdings_breakdown as HoldingEntry[];
@@ -75,7 +44,7 @@ Deno.serve(async (req) => {
   if (selectedCurrencyPrice !== null) {
     holdings = holdings.map((h) => ({
       ...h,
-      value_selected: h.value_usd / selectedCurrencyPrice!,
+      value_selected: h.value_usd / selectedCurrencyPrice,
     }));
   }
 
@@ -84,12 +53,9 @@ Deno.serve(async (req) => {
   );
   console.log("=== last-visit DONE ===");
 
-  return new Response(
-    JSON.stringify({
-      currency: snapshot.currency,
-      captured_at: snapshot.captured_at,   // kiedy user ostatnio otworzył apkę
-      holdings_breakdown: holdings,
-    }),
-    { status: 200, headers: { "Content-Type": "application/json" } }
-  );
+  return json({
+    currency: snapshot.currency,
+    captured_at: snapshot.captured_at,   // kiedy user ostatnio otworzył apkę
+    holdings_breakdown: holdings,
+  });
 });

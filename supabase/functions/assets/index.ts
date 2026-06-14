@@ -1,14 +1,12 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { getServiceClient } from "../_shared/supabase.ts";
+import { json, serverError } from "../_shared/http.ts";
 
 // Publiczny endpoint — zwraca wszystkie aktywa z aktualnym kursem, pogrupowane po kategorii.
 // Używany przez frontend do wyświetlenia listy dostępnych aktywów i ich cen.
 Deno.serve(async () => {
   console.log("=== assets START ===");
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+  const supabase = getServiceClient();
 
   // Pobieramy ceny i definicje równolegle.
   // asset_definitions jest źródłem prawdy dla category i display_name.
@@ -21,10 +19,7 @@ Deno.serve(async () => {
   if (pricesResult.error || defsResult.error) {
     const msg = pricesResult.error?.message ?? defsResult.error?.message;
     console.error(`[assets] DB error: ${msg}`);
-    return new Response(JSON.stringify({ error: msg }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return serverError(msg ?? "DB error");
   }
 
   // Budujemy lookup asset_id → { category, display_name }
@@ -54,8 +49,5 @@ Deno.serve(async () => {
   );
   console.log("=== assets DONE ===");
 
-  return new Response(JSON.stringify(grouped), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+  return json(grouped);
 });

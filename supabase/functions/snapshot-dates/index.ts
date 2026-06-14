@@ -1,4 +1,5 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { getServiceClient } from "../_shared/supabase.ts";
+import { badRequest, json, serverError } from "../_shared/http.ts";
 
 // GET /snapshot-dates?user_id=UUID
 //
@@ -9,17 +10,9 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
   const userId = url.searchParams.get("user_id");
 
-  if (!userId) {
-    return new Response(JSON.stringify({ error: "Missing user_id" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (!userId) return badRequest("Missing user_id");
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+  const supabase = getServiceClient();
 
   const { data, error } = await supabase
     .from("portfolio_snapshots")
@@ -28,18 +21,10 @@ Deno.serve(async (req) => {
     .eq("source", "cron")
     .order("captured_at", { ascending: false });
 
-  if (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (error) return serverError(error.message);
 
   // Wyciągamy samą datę (YYYY-MM-DD) z timestampa — bez godziny.
   const dates = (data ?? []).map((row) => row.captured_at.slice(0, 10));
 
-  return new Response(JSON.stringify({ dates }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+  return json({ dates });
 });

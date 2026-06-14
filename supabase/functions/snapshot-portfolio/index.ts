@@ -1,59 +1,14 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
-
-type HoldingEntry = {
-  asset_id: string;
-  category: string;
-  amount: number;
-  price_usd: number;
-  value_usd: number;
-  value_ccy: number;
-};
-
-async function writeLog(
-  supabase: ReturnType<typeof createClient>,
-  success: boolean,
-  snapshotsCreated: number | null,
-  errorMessage: string | null,
-  warnings: string | null
-): Promise<void> {
-  const { error } = await supabase.from("cron_logs").insert({
-    function_name: "snapshot-portfolio",
-    success,
-    items_processed: snapshotsCreated,
-    error_message: errorMessage,
-    warnings,
-  });
-  if (error) console.error(`[DB] Błąd zapisu do cron_logs: ${error.message}`);
-}
-
-async function sendAlertEmail(subject: string, body: string): Promise<void> {
-  const resendKey = Deno.env.get("RESEND_API_KEY");
-  const alertEmail = Deno.env.get("ALERT_EMAIL");
-  if (!resendKey || !alertEmail) {
-    console.warn("[Email] Brak RESEND_API_KEY lub ALERT_EMAIL — pomijam");
-    return;
-  }
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${resendKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from: "abundapp <onboarding@resend.dev>",
-      to: alertEmail,
-      subject,
-      html: `<p><strong>Czas:</strong> ${new Date().toISOString()}</p><pre style="background:#f4f4f4;padding:12px;line-height:2">${body.split("\n").join("<br>")}</pre>`,
-    }),
-  });
-  console.log(`[Email] Resend HTTP status: ${res.status}`);
-}
+import { getServiceClient } from "../_shared/supabase.ts";
+import { json } from "../_shared/http.ts";
+import { sendAlertEmail, writeCronLog } from "../_shared/alerts.ts";
+import { buildPriceMap } from "../_shared/pricing.ts";
+import type { HoldingEntry } from "../_shared/types.ts";
 
 // Wywoływana przez pg_cron raz dziennie — zapisuje stan portfela wszystkich userów.
 Deno.serve(async () => {
   console.log("=== snapshot-portfolio START ===");
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+  const supabase = getServiceClient();
 
   try {
     const [pricesResult, profilesResult, defsResult] = await Promise.all([
@@ -69,21 +24,11 @@ Deno.serve(async () => {
       throw new Error(`Failed to fetch profiles: ${profilesResult.error?.message}`);
     }
 
-    const prices = pricesResult.data;
     const profiles = profilesResult.data;
+    console.log(`[snapshot] ${profiles.length} users, ${pricesResult.data.length} assets in price_cache`);
 
-    console.log(`[snapshot] ${profiles.length} users, ${prices.length} assets in price_cache`);
-
-    // category pochodzi z asset_definitions — źródła prawdy
-    const categoryMap: Record<string, string> = {};
-    for (const d of defsResult.data ?? []) {
-      categoryMap[d.asset_id] = d.category;
-    }
-
-    const priceMap: Record<string, { price_usd: number; category: string }> = {};
-    for (const p of prices) {
-      priceMap[p.asset_id] = { price_usd: p.price_usd, category: categoryMap[p.asset_id] ?? "unknown" };
-    }
+    // Mapa asset_id → { price_usd, category } (category z asset_definitions — źródła prawdy).
+    const priceMap = buildPriceMap(pricesResult.data, defsResult.data ?? []);
 
     const now = new Date();
     const todayStart = new Date(now);
@@ -140,11 +85,8 @@ Deno.serve(async () => {
 
     if (snapshots.length === 0) {
       console.log("[snapshot] Brak userów do snapshotu");
-      await writeLog(supabase, true, 0, null, null);
-      return new Response(
-        JSON.stringify({ success: true, snapshots: 0 }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
+      await writeCronLog(supabase, "snapshot-portfolio", { success: true, itemsProcessed: 0, errorMessage: null, warnings: null });
+      return json({ success: true, snapshots: 0 });
     }
 
     const { error: insertError } = await supabase
@@ -156,26 +98,18 @@ Deno.serve(async () => {
     console.log(`[snapshot] Inserted ${snapshots.length} snapshots`);
 
     const warningsText = warnings.length > 0 ? warnings.join("\n") : null;
-    await writeLog(supabase, true, snapshots.length, null, warningsText);
+    await writeCronLog(supabase, "snapshot-portfolio", { success: true, itemsProcessed: snapshots.length, errorMessage: null, warnings: warningsText });
 
     console.log("=== snapshot-portfolio DONE ===");
-
-    return new Response(
-      JSON.stringify({ success: true, snapshots: snapshots.length, warnings }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
-
+    return json({ success: true, snapshots: snapshots.length, warnings });
   } catch (err) {
     const errorMsg = String(err);
     console.error(`[snapshot] ERROR: ${errorMsg}`);
     await Promise.all([
-      writeLog(supabase, false, null, errorMsg, null),
+      writeCronLog(supabase, "snapshot-portfolio", { success: false, itemsProcessed: null, errorMessage: errorMsg, warnings: null }),
       sendAlertEmail("❌ abundapp: błąd snapshot-portfolio", errorMsg),
     ]);
     console.log("=== snapshot-portfolio FAILED ===");
-    return new Response(
-      JSON.stringify({ success: false, error: errorMsg }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return json({ success: false, error: errorMsg }, 500);
   }
 });

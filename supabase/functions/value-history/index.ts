@@ -1,13 +1,7 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
-
-type HoldingEntry = {
-  asset_id: string;
-  category: string;
-  amount: number;
-  price_usd: number;
-  value_usd: number;
-  value_ccy: number;
-};
+import { getServiceClient } from "../_shared/supabase.ts";
+import { badRequest, json, notFound, serverError } from "../_shared/http.ts";
+import { resolveSelectedCurrency } from "../_shared/currency.ts";
+import type { HoldingEntry } from "../_shared/types.ts";
 
 type Point = {
   date: string;
@@ -35,34 +29,14 @@ Deno.serve(async (req) => {
   const fromParam = url.searchParams.get("from");
   const toParam = url.searchParams.get("to");
 
-  if (!userId) {
-    return new Response(JSON.stringify({ error: "Missing user_id" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (!userId) return badRequest("Missing user_id");
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+  const supabase = getServiceClient();
 
-  // Walidacja ?currency=X — musi być walutą (nie krypto/akcją).
-  let selectedCurrencyPrice: number | null = null;
-  if (currencyParam) {
-    const [defResult, priceResult] = await Promise.all([
-      supabase.from("asset_definitions").select("asset_id").eq("asset_id", currencyParam).eq("category", "currency").eq("active", true).single(),
-      supabase.from("price_cache").select("price_usd").eq("asset_id", currencyParam).single(),
-    ]);
-
-    if (defResult.error || !defResult.data || priceResult.error || !priceResult.data) {
-      return new Response(
-        JSON.stringify({ error: `Currency ${currencyParam} not found` }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-    selectedCurrencyPrice = priceResult.data.price_usd;
-  }
+  // Walidacja ?currency=X — musi być walutą (nie krypto/akcją); zwraca kurs USD lub null.
+  const selected = await resolveSelectedCurrency(supabase, currencyParam);
+  if (!selected.ok) return selected.error;
+  const selectedCurrencyPrice = selected.price;
 
   // Sprawdzamy czy user istnieje — potrzebujemy preferred_currency do opisu osi.
   const { data: profile, error: profileErr } = await supabase
@@ -71,12 +45,7 @@ Deno.serve(async (req) => {
     .eq("id", userId)
     .single();
 
-  if (profileErr || !profile) {
-    return new Response(JSON.stringify({ error: "User profile not found" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (profileErr || !profile) return notFound("User profile not found");
 
   // Pobieramy cron-snapshoty w żądanym przedziale czasowym.
   let query = supabase
@@ -91,12 +60,7 @@ Deno.serve(async (req) => {
 
   const { data: snapshots, error: snapErr } = await query;
 
-  if (snapErr) {
-    return new Response(JSON.stringify({ error: "Failed to fetch snapshots" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (snapErr) return serverError("Failed to fetch snapshots");
 
   // Budujemy punkty wykresu — jeden punkt na dzień.
   const points: Point[] = (snapshots ?? []).map((snap) => {
@@ -133,11 +97,8 @@ Deno.serve(async (req) => {
   );
   console.log("=== value-history DONE ===");
 
-  return new Response(
-    JSON.stringify({
-      currency: profile.preferred_currency,
-      points,
-    }),
-    { status: 200, headers: { "Content-Type": "application/json" } }
-  );
+  return json({
+    currency: profile.preferred_currency,
+    points,
+  });
 });

@@ -1,4 +1,7 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { getServiceClient, type Supa } from "../_shared/supabase.ts";
+import { json } from "../_shared/http.ts";
+import { sendAlertEmail, writeCronLog } from "../_shared/alerts.ts";
+import type { PriceRow } from "../_shared/types.ts";
 import {
   applyOutcomes,
   type AssetCandidate,
@@ -8,24 +11,8 @@ import {
   REQUEST_SIZE,
 } from "./logic.ts";
 
-type PriceRow = {
-  asset_id: string;
-  price_usd: number;
-  updated_at: string;
-};
-
 // Tylko Twelve Data — metale mają własną funkcję fetch-metals (Metals.Dev, limit 100 req/mies.,
 // wolny cron co 2 dni). Tutaj kursor co 15 min + licznik awarii w damaged_assets.
-
-// Jedna fabryka klienta — typ Supa pochodzi z tego samego wywołania co instancja,
-// dzięki czemu generyki supabase-js zgadzają się we wszystkich helperach.
-function getClient() {
-  return createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-  );
-}
-type Supa = ReturnType<typeof getClient>;
 
 // ── Wczytanie stanu z bazy ──────────────────────────────────────────────────
 // Zwraca kandydatów Twelve Data (z updated_at) i tabelę awarii. Metale tu nie wchodzą.
@@ -110,44 +97,6 @@ async function fetchTwelveData(
   }
 }
 
-async function sendAlertEmail(subject: string, body: string): Promise<void> {
-  const resendKey = Deno.env.get("RESEND_API_KEY");
-  const alertEmail = Deno.env.get("ALERT_EMAIL");
-  if (!resendKey || !alertEmail) {
-    console.warn("[Email] Brak RESEND_API_KEY lub ALERT_EMAIL — pomijam wysyłkę");
-    return;
-  }
-  console.log(`[Email] Wysyłam alert na ${alertEmail}: "${subject}"`);
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${resendKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from: "abundapp <onboarding@resend.dev>",
-      to: alertEmail,
-      subject,
-      html: `<p><strong>Czas:</strong> ${new Date().toISOString()}</p><pre style="background:#f4f4f4;padding:12px;line-height:2">${body.split("\n").join("<br>")}</pre>`,
-    }),
-  });
-  console.log(`[Email] Resend HTTP ${res.status}`);
-}
-
-async function writeLog(
-  supabase: Supa,
-  success: boolean,
-  itemsProcessed: number | null,
-  errorMessage: string | null,
-  warnings: string | null,
-): Promise<void> {
-  const { error } = await supabase.from("cron_logs").insert({
-    function_name: "fetch-prices",
-    success,
-    items_processed: itemsProcessed,
-    error_message: errorMessage,
-    warnings,
-  });
-  if (error) console.error(`[DB] Błąd zapisu cron_logs: ${error.message}`);
-}
-
 // Zapisuje do damaged_assets decyzje z applyOutcomes: kasuje wpisy po sukcesie, upsertuje liczniki po porażce.
 async function persistDamaged(
   supabase: Supa,
@@ -167,7 +116,7 @@ async function persistDamaged(
 Deno.serve(async () => {
   console.log("=== fetch-prices START ===");
   const now = new Date();
-  const supabase = getClient();
+  const supabase = getServiceClient();
 
   try {
     const twelveApiKey = Deno.env.get("TWELVE_DATA_API_KEY");
@@ -203,7 +152,7 @@ Deno.serve(async () => {
       const errMsg = `Assety z wyczerpanym limitem prób: ${list}`;
       console.error(`[ALERT] ${errMsg}`);
       await Promise.all([
-        writeLog(supabase, false, twelve.rows.length, errMsg, warningsText),
+        writeCronLog(supabase, "fetch-prices", { success: false, itemsProcessed: twelve.rows.length, errorMessage: errMsg, warnings: warningsText }),
         sendAlertEmail(
           `❌ abundapp: asset niedostępny (${list})`,
           `Następujące assety dobiły dziennego limitu prób pobrania:\n${list}\n\n` +
@@ -211,32 +160,26 @@ Deno.serve(async () => {
         ),
       ]);
     } else {
-      await writeLog(supabase, true, twelve.rows.length, null, warningsText);
+      await writeCronLog(supabase, "fetch-prices", { success: true, itemsProcessed: twelve.rows.length, errorMessage: null, warnings: warningsText });
     }
 
     console.log("=== fetch-prices DONE ===");
-    return new Response(
-      JSON.stringify({
-        success: true,
-        attempted: selected.map((s) => s.asset_id),
-        updated: twelve.rows.length,
-        failed: twelve.failed,
-        alerts: alerts.map((a) => a.asset_id),
-        warnings: twelve.errors,
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    return json({
+      success: true,
+      attempted: selected.map((s) => s.asset_id),
+      updated: twelve.rows.length,
+      failed: twelve.failed,
+      alerts: alerts.map((a) => a.asset_id),
+      warnings: twelve.errors,
+    });
   } catch (err) {
     const errorMsg = String(err);
     console.error(`[ERROR] ${errorMsg}`);
     await Promise.all([
-      writeLog(supabase, false, null, errorMsg, null),
+      writeCronLog(supabase, "fetch-prices", { success: false, itemsProcessed: null, errorMessage: errorMsg, warnings: null }),
       sendAlertEmail("❌ abundapp: błąd fetch-prices", errorMsg),
     ]);
     console.log("=== fetch-prices FAILED ===");
-    return new Response(
-      JSON.stringify({ success: false, error: errorMsg }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return json({ success: false, error: errorMsg }, 500);
   }
 });

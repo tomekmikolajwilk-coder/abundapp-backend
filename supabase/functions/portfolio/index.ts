@@ -1,17 +1,11 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { getServiceClient } from "../_shared/supabase.ts";
+import { badRequest, json, notFound, serverError } from "../_shared/http.ts";
+import { resolveSelectedCurrency } from "../_shared/currency.ts";
+import { buildPriceMap } from "../_shared/pricing.ts";
+import type { HoldingEntry } from "../_shared/types.ts";
 
 // Globalny obiekt runtime'u Supabase Edge — pozwala dokończyć zadanie w tle po wysłaniu odpowiedzi.
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void } | undefined;
-
-type HoldingEntry = {
-  asset_id: string;
-  category: string;
-  amount: number;
-  price_usd: number;
-  value_usd: number;
-  value_ccy: number;
-  value_selected?: number;
-};
 
 // GET /portfolio?user_id=UUID
 // GET /portfolio?user_id=UUID&date=2026-06-03              → ostatni snapshot z tego dnia
@@ -25,40 +19,18 @@ Deno.serve(async (req) => {
   const dateParam = url.searchParams.get("date");
   const currencyParam = url.searchParams.get("currency")?.toUpperCase() ?? null;
 
-  if (!userId) {
-    return new Response(JSON.stringify({ error: "Missing user_id" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (!userId) return badRequest("Missing user_id");
 
   console.log(
     `[portfolio] user_id=${userId} date=${dateParam ?? "live"} currency=${currencyParam ?? "none"}`
   );
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+  const supabase = getServiceClient();
 
-  // Jeśli user podał ?currency=X, walidujemy że to waluta (nie np. akcja)
-  // sprawdzając asset_definitions, a kurs pobieramy z price_cache.
-  let selectedCurrencyPrice: number | null = null;
-  if (currencyParam) {
-    const [defResult, priceResult] = await Promise.all([
-      supabase.from("asset_definitions").select("asset_id").eq("asset_id", currencyParam).eq("category", "currency").eq("active", true).single(),
-      supabase.from("price_cache").select("price_usd").eq("asset_id", currencyParam).single(),
-    ]);
-
-    if (defResult.error || !defResult.data || priceResult.error || !priceResult.data) {
-      return new Response(
-        JSON.stringify({ error: `Currency ${currencyParam} not found` }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-    selectedCurrencyPrice = priceResult.data.price_usd;
-    console.log(`[portfolio] selected currency ${currencyParam} = $${selectedCurrencyPrice} USD`);
-  }
+  // Walidacja ?currency=X — musi być aktywną walutą; zwraca kurs USD lub null.
+  const selected = await resolveSelectedCurrency(supabase, currencyParam);
+  if (!selected.ok) return selected.error;
+  const selectedCurrencyPrice = selected.price;
 
   // ── HISTORYCZNY: szukamy ostatniego snapshotu przed podanym momentem ──────
   if (dateParam) {
@@ -78,19 +50,14 @@ Deno.serve(async (req) => {
       .limit(1)
       .single();
 
-    if (snapErr || !snapshot) {
-      return new Response(
-        JSON.stringify({ error: `No snapshot found for date ${dateParam}` }),
-        { status: 404, headers: { "Content-Type": "application/json" } }
-      );
-    }
+    if (snapErr || !snapshot) return notFound(`No snapshot found for date ${dateParam}`);
 
     let holdings = snapshot.holdings_breakdown as HoldingEntry[];
 
     if (selectedCurrencyPrice !== null) {
       holdings = holdings.map((h) => ({
         ...h,
-        value_selected: h.value_usd / selectedCurrencyPrice!,
+        value_selected: h.value_usd / selectedCurrencyPrice,
       }));
     }
 
@@ -99,15 +66,12 @@ Deno.serve(async (req) => {
     );
     console.log("=== portfolio DONE ===");
 
-    return new Response(
-      JSON.stringify({
-        currency: snapshot.currency,
-        captured_at: snapshot.captured_at,
-        source: snapshot.source,
-        holdings_breakdown: holdings,
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
+    return json({
+      currency: snapshot.currency,
+      captured_at: snapshot.captured_at,
+      source: snapshot.source,
+      holdings_breakdown: holdings,
+    });
   }
 
   // ── LIVE: liczymy na bieżąco z profiles + price_cache + asset_definitions ──
@@ -117,32 +81,13 @@ Deno.serve(async (req) => {
     supabase.from("asset_definitions").select("asset_id, category").eq("active", true),
   ]);
 
-  if (profileResult.error || !profileResult.data) {
-    return new Response(JSON.stringify({ error: "User profile not found" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  if (pricesResult.error || !pricesResult.data) {
-    return new Response(JSON.stringify({ error: "Failed to fetch prices" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (profileResult.error || !profileResult.data) return notFound("User profile not found");
+  if (pricesResult.error || !pricesResult.data) return serverError("Failed to fetch prices");
 
   const { preferred_currency, holdings } = profileResult.data;
 
-  // category pochodzi z asset_definitions — źródła prawdy
-  const categoryMap: Record<string, string> = {};
-  for (const d of defsResult.data ?? []) {
-    categoryMap[d.asset_id] = d.category;
-  }
-
-  const priceMap: Record<string, { price_usd: number; category: string }> = {};
-  for (const p of pricesResult.data) {
-    priceMap[p.asset_id] = { price_usd: p.price_usd, category: categoryMap[p.asset_id] ?? "unknown" };
-  }
+  // Mapa asset_id → { price_usd, category } (category z asset_definitions — źródła prawdy).
+  const priceMap = buildPriceMap(pricesResult.data, defsResult.data ?? []);
 
   const ccyPrice = priceMap[preferred_currency]?.price_usd ?? null;
   if (!ccyPrice) {
@@ -204,8 +149,5 @@ Deno.serve(async (req) => {
   console.log(`[portfolio] live — ${breakdown.length} assets, currency=${preferred_currency}`);
   console.log("=== portfolio DONE ===");
 
-  return new Response(
-    JSON.stringify({ currency: preferred_currency, holdings_breakdown: breakdown }),
-    { status: 200, headers: { "Content-Type": "application/json" } }
-  );
+  return json({ currency: preferred_currency, holdings_breakdown: breakdown });
 });
