@@ -389,34 +389,27 @@ Kształt błędu: `{ "error": "opis" }`. Funkcje cron zwracają na błędzie `{ 
 
 ## 13. Koszty — płatne API, biblioteki i plany
 
-Stan na **2026-06-14**. Wszystko obecnie na **darmowych tierach** — zero realnych kosztów.
+Stan na **2026-06-14**. Wszystko obecnie **w ramach darmowych tierów / licencji — zero realnych kosztów**.
 Kwoty orientacyjne; przed upgradem sprawdź aktualny cennik dostawcy.
 
-### Supabase — baza + auth + Edge Functions + cron
-- **Plan teraz:** Free.
-- **Limity free:** ~500 MB DB, ~500 tys. wywołań Edge Functions/mies., projekt **pauzuje po 7 dniach bezczynności**.
-- **Kiedy upgrade → Pro (~$25/mies.):** produkcja (brak pauzowania), przekroczenie DB/transferu, backupy, więcej wywołań funkcji.
+### Usługi (API, hosting, mail)
 
-### Twelve Data — krypto, akcje, ETF, forex
-- **Plan teraz:** Free (8 credits/min, 800 credits/dobę, **tylko rynki US**).
-- **Zużycie dziś:** 8 assetów × 96 wywołań/dobę = 768 < 800 — mieścimy się z zapasem.
-- **Kiedy upgrade (płatny od ~$29/mies.):**
-  - dane giełd EU (XETRA/LSE) → odblokowanie VWCE, IWDA, CSPX, AGGH (dziś `active=false`);
-  - więcej assetów lub częstsze odświeżanie (próg 800/dobę);
-  - wyższy rate limit niż 8/min.
+| Usługa | Do czego | Plan teraz | Zużycie / limit dziś | Warunki przejścia na wyższy plan |
+|--------|----------|-----------|----------------------|----------------------------------|
+| **Supabase** | baza, auth, Edge Functions, cron | Free | DB ~500 MB, ~500 tys. wywołań funkcji/mies.; projekt **pauzuje po 7 dniach bezczynności** | **Pro ~$25/mies.** — produkcja (brak pauzowania), backupy, przekroczenie DB/transferu/wywołań |
+| **Twelve Data** | krypto, akcje, ETF, forex | Free | 8 credits/min, 800/dobę, **tylko rynki US**; zużycie 8×96 = **768/800** | **płatny od ~$29/mies.** — giełdy EU (XETRA/LSE → VWCE/IWDA/CSPX/AGGH), więcej assetów, próg 800/dobę lub rate limit 8/min |
+| **Metals.Dev** | metale (XAU, XAG, XPT, XPD) | Free | **100 req/miesiąc**; zużycie 4 metale co 2 dni ≈ **60/100** | płatny — więcej metali, częstszy cron lub dobicie do 100/mies. |
+| **Resend** | alerty mailowe przy awariach cronów | Free | 100 maili/dobę, 3000/mies., 1 domena (nadawca `onboarding@resend.dev`) | **~$20/mies.** — własna domena nadawcza, większy wolumen |
 
-### Metals.Dev — metale (XAU, XAG, XPT, XPD)
-- **Plan teraz:** Free (**100 req/miesiąc**).
-- **Zużycie dziś:** 4 metale co 2 dni ≈ 60 req/mies. < 100.
-- **Kiedy upgrade:** więcej metali, częstszy cron lub dojście do limitu 100/mies.
+### Biblioteki frontendu (Flutter — repo `abundapp-frontend`)
 
-### Resend — alerty mailowe (awarie cronów)
-- **Plan teraz:** Free (100 maili/dobę, 3000/mies., 1 domena; nadawca `onboarding@resend.dev`).
-- **Kiedy upgrade (~$20/mies.):** własna domena nadawcza, większy wolumen maili.
+| Biblioteka | Do czego | Licencja / koszt | Uwaga |
+|------------|----------|------------------|-------|
+| **`syncfusion_flutter_charts`** | wykresy (zaawansowane) | **Komercyjna.** Darmowa tylko na **Community License**: roczny przychód < $1 mln USD, ≤5 deweloperów, ≤10 pracowników. Inaczej płatna (subskrypcja per-deweloper). | **Jedyna potencjalnie płatna zależność.** Dziś kwalifikujemy się na Community (projekt prywatny) — pilnować progu przy komercjalizacji |
+| `fl_chart` | wykresy (proste) | MIT — darmowa | open-source |
+| `supabase_flutter` | klient Supabase | BSD/MIT — darmowa | oficjalny SDK |
+| `flutter_riverpod`, `riverpod_annotation` | state management | MIT — darmowa | |
+| `http`, `shared_preferences`, `intl`, `cupertino_icons` | sieć, storage, formatowanie, ikony | BSD/MIT — darmowe | standardowe pakiety |
 
-### Biblioteki frontendu (Flutter — osobne repo)
-- **Wykresy:** _(do uzupełnienia — biblioteka żyje w repo Flutter)_ — sprawdzić licencję/koszt.
-- `supabase_flutter` — oficjalny klient Supabase, open-source, darmowy.
-
-> Backend (to repo) sam w sobie nie ciągnie płatnych bibliotek — wszystkie zależności
-> Edge Functions (`supabase-js`, Deno std) są darmowe i open-source.
+> **Backend (to repo)** nie ciągnie żadnych płatnych bibliotek — zależności Edge Functions
+> (`supabase-js`, Deno std) są darmowe i open-source. Jedyne koszty backendu to usługi z tabeli wyżej.
