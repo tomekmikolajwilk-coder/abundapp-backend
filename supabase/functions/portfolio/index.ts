@@ -1,5 +1,8 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
+// Globalny obiekt runtime'u Supabase Edge — pozwala dokończyć zadanie w tle po wysłaniu odpowiedzi.
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void } | undefined;
+
 type HoldingEntry = {
   asset_id: string;
   category: string;
@@ -171,8 +174,10 @@ Deno.serve(async (req) => {
 
   // Zapisujemy snapshot wizyty — zawsze tylko jeden wiersz na usera (ostatnia wizyta).
   // Najpierw usuwamy poprzedni, potem wstawiamy nowy.
-  // Fire-and-forget — nie blokujemy odpowiedzi, błąd zapisu nie failuje requestu.
-  ;(async () => {
+  // Tło — nie blokujemy odpowiedzi, błąd zapisu nie failuje requestu. EdgeRuntime.waitUntil
+  // trzyma workera przy życiu aż delete+insert się dokończą; bez tego runtime ubija
+  // niezakończoną promesę zaraz po response (gubiony visit-snapshot, zwłaszcza na cold-starcie).
+  const saveVisitSnapshot = (async () => {
     await supabase
       .from("portfolio_snapshots")
       .delete()
@@ -190,6 +195,11 @@ Deno.serve(async (req) => {
     if (error) console.warn(`[portfolio] Nie udało się zapisać visit snapshot: ${error.message}`);
     else console.log(`[portfolio] Visit snapshot saved`);
   })();
+
+  // EdgeRuntime to globalny obiekt środowiska Supabase (poza nim — np. w testach — nie istnieje).
+  if (typeof EdgeRuntime !== "undefined") {
+    EdgeRuntime.waitUntil(saveVisitSnapshot);
+  }
 
   console.log(`[portfolio] live — ${breakdown.length} assets, currency=${preferred_currency}`);
   console.log("=== portfolio DONE ===");
