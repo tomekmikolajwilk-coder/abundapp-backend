@@ -23,7 +23,7 @@ Deno.serve(async (req) => {
   console.log("=== value-history START ===");
 
   const url = new URL(req.url);
-  const userId = resolveUserId(req, url);
+  const userId = resolveUserId(req);
   const categoryParam = url.searchParams.get("category_id");
   const assetIdParam = url.searchParams.get("asset_id");
   const currencyParam = url.searchParams.get("currency")?.toUpperCase() ?? null;

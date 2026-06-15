@@ -229,8 +229,8 @@ Przykład: REIT = `category 'real_estate'` + `api_source 'twelve_data'`; fizyczn
 ## 6. Edge Functions — endpointy publiczne
 
 Base: `https://mrcjjyaljautuylpsssp.supabase.co/functions/v1`
-Auth: **wymagany JWT** (Bearer zalogowanego usera) — `user_id` brany z claim `sub`.
-Query param `?user_id=` zostaje jako fallback na czas przejścia (patrz §11).
+Auth: **wymagany JWT** (Bearer zalogowanego usera) — `user_id` brany **wyłącznie** z claim
+`sub`. Query param `?user_id=` **nie istnieje** — nie da się odpytać o cudze dane (patrz §11).
 
 ### `GET /assets`
 Wszystkie aktywne aktywa z aktualnym kursem, pogrupowane po kategorii.
@@ -243,7 +243,7 @@ Wszystkie aktywne aktywa z aktualnym kursem, pogrupowane po kategorii.
 }
 ```
 
-### `GET /portfolio?user_id=UUID`
+### `GET /portfolio`
 Live portfolio — liczone na bieżąco z `profiles.holdings × price_cache`.
 Każde wywołanie zapisuje w tle visit-snapshot (`EdgeRuntime.waitUntil`).
 ```json
@@ -262,7 +262,7 @@ Parametry opcjonalne:
 
 Frontend liczy total sam (suma `value_usd` / `value_ccy`).
 
-### `GET /last-visit?user_id=UUID`
+### `GET /last-visit`
 Ostatnia wizyta usera — kiedy i jaki był wtedy portfel (do „od ostatniej wizyty: +X%").
 ```json
 {
@@ -274,7 +274,7 @@ Ostatnia wizyta usera — kiedy i jaki był wtedy portfel (do „od ostatniej wi
 - `&currency=EUR` — dodaje `value_selected`.
 - 404 jeśli user nigdy nie otworzył aplikacji.
 
-### `GET /snapshot-dates?user_id=UUID`
+### `GET /snapshot-dates`
 Lista dat (YYYY-MM-DD) dostępnych cron-snapshotów, od najnowszej. Frontend wie, które
 opcje PnL pokazać (wczoraj, start tygodnia/miesiąca/roku).
 ```json
@@ -282,7 +282,7 @@ opcje PnL pokazać (wczoraj, start tygodnia/miesiąca/roku).
 ```
 - Nieistniejący user → `200` z pustą tablicą `[]`.
 
-### `GET /value-history?user_id=UUID`
+### `GET /value-history`
 Szereg czasowy wartości portfela z cron-snapshotów — jeden punkt na dzień. Zamiast
 N requestów `?date=` frontend dostaje cały wykres naraz.
 ```json
@@ -375,12 +375,14 @@ Kształt błędu: `{ "error": "opis" }`. Funkcje cron zwracają na błędzie `{ 
 - **Teraz:** endpointy per-user (`portfolio`, `last-visit`, `assets`, `snapshot-dates`,
   `value-history`) mają **`verify_jwt = true`** (config.toml). Bramka Supabase weryfikuje
   podpis tokena, funkcja czyta `user_id` z claim `sub` (helper `_shared/auth.ts`).
-- **user_id wg roli tokena** (helper `resolveUserId`): token `authenticated` → `user_id`
-  tylko z `sub` (query param **ignorowany** — nie da się podać cudzego id); token
-  `service_role` (sekretny, serwerowy) → dozwolony fallback `?user_id=`; `anon`/brak
-  tokena → brak dostępu. Anon key jest publiczny, więc **nie** może czytać danych per-user.
+- **user_id tylko z `sub`** (helper `resolveUserId`): token `authenticated` → `user_id`
+  z claim `sub`; `anon` / `service_role` / brak `sub` → **brak dostępu** (`null`). Nie ma
+  żadnego fallbacku na `?user_id=` — query param jest całkowicie ignorowany, więc nawet
+  z ważnym (publicznym) anon key nie da się podać cudzego id i odczytać nie swoich danych.
 - **Funkcje cron + `smoke-test`:** `verify_jwt = false` (woła je pg_cron / CI bez tokena
-  usera). Deploy bez flagi `--no-verify-jwt` — bramka sterowana per-funkcja z `config.toml`.
+  usera). `smoke-test` loguje się jako testowy user (password grant, sekret
+  `SMOKE_TEST_PASSWORD`) i dopiero tym tokenem odpytuje endpointy per-user. Deploy bez flagi
+  `--no-verify-jwt` — bramka sterowana per-funkcja z `config.toml`.
 - **Nowy user bez danych:** profil zakładany automatycznie triggerem `on_auth_user_created`
   przy rejestracji (pusty `holdings` → `portfolio` zwraca `holdings_breakdown: []`, nie 404).
   `last-visit` bez wizyt → 404 (oczekiwane, frontend to obsługuje).

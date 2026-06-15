@@ -1,32 +1,16 @@
 // Ustalenie user_id dla endpointów per-user.
 //
-// Bramka Supabase (verify_jwt=true) weryfikuje PODPIS tokena zanim funkcja wystartuje,
-// ale przepuszcza KAŻDY ważny token projektu — w tym anon key, który jest publiczny
-// (zaszyty w aplikacji). Dlatego user_id ustalamy świadomie wg roli tokena:
+// Bramka Supabase (verify_jwt=true) weryfikuje PODPIS tokena zanim funkcja wystartuje.
+// user_id bierzemy WYŁĄCZNIE z claim `sub` tokena zalogowanego usera — bez żadnego
+// fallbacku na ?user_id=. Dzięki temu nikt (nawet z ważnym anon key, który jest
+// publiczny) nie poda cudzego id i nie odczyta nie swoich danych.
 //
-//   • bearer == service_role key → fallback na ?user_id= dozwolony. To klucz sekretny
-//     (nie trafia do klienta), używany serwerowo (smoke-test, narzędzia) — może działać
-//     "za usera". Porównujemy token wprost do klucza, bo bywa nie-JWT (`sb_secret_…`),
-//     więc dekodowanie roli jest zawodne.
-//   • token usera (authenticated) → user_id WYŁĄCZNIE z claim `sub`. Query param
-//     ignorowany, żeby posiadacz dowolnego tokena nie podał cudzego ?user_id=.
-//   • anon / brak tokena → null. Zewnętrzny wołający nie ma dostępu do danych per-user.
-export function resolveUserId(req: Request, url: URL): string | null {
-  const header = req.headers.get("Authorization");
-  const token = header?.startsWith("Bearer ") ? header.slice(7).trim() : null;
-
-  // Klucz przychodzi w Authorization i/lub w nagłówku apikey — sprawdzamy oba,
-  // bo nie zakładamy, że bramka forwarduje akurat ten jeden nienaruszony.
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (serviceKey && (token === serviceKey || req.headers.get("apikey") === serviceKey)) {
-    return url.searchParams.get("user_id");
-  }
-
-  const claims = decodeBearer(header);
-  if (claims?.role === "authenticated") {
-    return typeof claims.sub === "string" && claims.sub.length > 0 ? claims.sub : null;
-  }
-  return null;
+//   • token usera (role=authenticated) → user_id = `sub`.
+//   • anon / service_role / brak `sub` → null (brak dostępu do danych per-user).
+export function resolveUserId(req: Request): string | null {
+  const claims = decodeBearer(req.headers.get("Authorization"));
+  if (claims?.role !== "authenticated") return null;
+  return typeof claims.sub === "string" && claims.sub.length > 0 ? claims.sub : null;
 }
 
 type JwtClaims = { sub?: unknown; role?: unknown };

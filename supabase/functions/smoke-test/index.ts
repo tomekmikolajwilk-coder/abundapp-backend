@@ -3,8 +3,14 @@
 //
 // Użycie:
 //   curl https://mrcjjyaljautuylpsssp.supabase.co/functions/v1/smoke-test | jq .
+//
+// Endpointy per-user mają verify_jwt=true i czytają user_id z claim `sub` (bez
+// fallbacku na ?user_id=). Dlatego smoke-test loguje się jako testowy user
+// (password grant) i odpytuje endpointy jego tokenem — czyli dokładnie tą samą
+// ścieżką auth co produkcyjny frontend. Sekrety: SMOKE_TEST_EMAIL (opcjonalny,
+// domyślnie konto testowe) + SMOKE_TEST_PASSWORD (wymagany).
 
-const TEST_USER_ID = "4ff2377f-a833-4a05-9930-391d84d4182d"; // testowy user (PLN, BTC/AAPL/XAU/EUR)
+const TEST_EMAIL = Deno.env.get("SMOKE_TEST_EMAIL") ?? "tomekmikolajwilk@gmail.com";
 
 type TestResult = {
   name: string;
@@ -27,20 +33,49 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+// Logowanie testowego usera przez password grant → access_token (JWT z `sub`).
+async function signIn(base: string, anonKey: string, email: string, password: string): Promise<string> {
+  const res = await fetch(`${base}/auth/v1/token?grant_type=password`, {
+    method: "POST",
+    headers: { apikey: anonKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.access_token) {
+    throw new Error(`Logowanie testowego usera nie powiodło się (HTTP ${res.status}): ${JSON.stringify(body)}`);
+  }
+  return body.access_token as string;
+}
+
 Deno.serve(async () => {
   const BASE = Deno.env.get("SUPABASE_URL")!;
-  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
+  const PASSWORD = Deno.env.get("SMOKE_TEST_PASSWORD");
   const TODAY = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
 
-  // Endpointy per-user mają verify_jwt=true — bramka odrzuca brak tokena (401).
-  // Wysyłamy service_role jako Bearer: jest poprawnym JWT (przechodzi bramkę), ale
-  // ma role=service_role bez `sub`, więc funkcje spadają na fallback ?user_id= z URL.
-  // Dzięki temu smoke-test wciąż weryfikuje ścieżkę query-param.
-  const AUTH_HEADERS = { Authorization: `Bearer ${SERVICE_KEY}`, apikey: SERVICE_KEY };
+  // Bez hasła nie zalogujemy testowego usera — cała reszta i tak by padła. Jasny błąd.
+  if (!PASSWORD) {
+    return new Response(
+      JSON.stringify({ error: "Brak sekretu SMOKE_TEST_PASSWORD — ustaw go w Supabase (Edge Functions → Secrets)." }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  let userToken: string;
+  try {
+    userToken = await signIn(BASE, ANON_KEY, TEST_EMAIL, PASSWORD);
+  } catch (e) {
+    return new Response(
+      JSON.stringify({ error: String(e) }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  // Wszystkie wywołania jako zalogowany user — token w Authorization, anon w apikey.
+  const AUTH_HEADERS = { Authorization: `Bearer ${userToken}`, apikey: ANON_KEY };
 
   // Pomocnik — robi GET i parsuje JSON. Memoizowany: ten sam URL fetchy tylko raz,
-  // kolejne wywołania zwracają z cache'a. Dzięki temu 33 testy robią ~25 requestów
-  // zamiast ~30 i nie obijamy się o rate limit Supabase Edge Functions.
+  // kolejne wywołania zwracają z cache'a — mniej requestów, mniej rate-limitu.
   const responseCache = new Map<string, { status: number; body: unknown }>();
   async function get(path: string): Promise<{ status: number; body: unknown }> {
     if (responseCache.has(path)) return responseCache.get(path)!;
@@ -49,6 +84,13 @@ Deno.serve(async () => {
     const result = { status: res.status, body };
     responseCache.set(path, result);
     return result;
+  }
+
+  // Wywołanie BEZ żadnego tokena — sprawdza, że bramka verify_jwt odrzuca (401).
+  async function statusNoAuth(path: string): Promise<number> {
+    const res = await fetch(`${BASE}/functions/v1/${path}`);
+    await res.text(); // drain
+    return res.status;
   }
 
   const results: TestResult[] = [];
@@ -69,21 +111,22 @@ Deno.serve(async () => {
   }));
 
   // ── /portfolio live ───────────────────────────────────────────────────────
+  // user_id bierze się z tokena (sub), nie z URL.
 
   results.push(await run("portfolio live: zwraca 200 i currency=PLN", async () => {
-    const { status, body } = await get(`portfolio?user_id=${TEST_USER_ID}`);
+    const { status, body } = await get("portfolio");
     assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
     assert((body as { currency: string }).currency === "PLN", "Oczekiwano currency=PLN");
   }));
 
   results.push(await run("portfolio live: ma 10 pozycji w holdings_breakdown", async () => {
-    const { body } = await get(`portfolio?user_id=${TEST_USER_ID}`);
+    const { body } = await get("portfolio");
     const len = (body as { holdings_breakdown: unknown[] }).holdings_breakdown.length;
     assert(len === 10, `Oczekiwano 10 pozycji, dostałem ${len}`);
   }));
 
   results.push(await run("portfolio live: value_usd = amount * price_usd dla każdej pozycji", async () => {
-    const { body } = await get(`portfolio?user_id=${TEST_USER_ID}`);
+    const { body } = await get("portfolio");
     type Holding = { asset_id: string; amount: number; price_usd: number; value_usd: number };
     const breakdown = (body as { holdings_breakdown: Holding[] }).holdings_breakdown;
     for (const h of breakdown) {
@@ -95,7 +138,7 @@ Deno.serve(async () => {
 
   results.push(await run("portfolio live ?currency=EUR: EUR holdings=500 → value_selected=500", async () => {
     // Klasyczny self-check: 500 EUR przeliczone na EUR musi dać dokładnie 500.
-    const { body } = await get(`portfolio?user_id=${TEST_USER_ID}&currency=EUR`);
+    const { body } = await get("portfolio?currency=EUR");
     type Holding = { asset_id: string; value_selected?: number };
     const eur = (body as { holdings_breakdown: Holding[] }).holdings_breakdown.find(h => h.asset_id === "EUR");
     assert(eur !== undefined, "Brak EUR w holdings_breakdown");
@@ -104,7 +147,7 @@ Deno.serve(async () => {
   }));
 
   results.push(await run("portfolio live ?currency=EUR: wszystkie pozycje mają value_selected", async () => {
-    const { body } = await get(`portfolio?user_id=${TEST_USER_ID}&currency=EUR`);
+    const { body } = await get("portfolio?currency=EUR");
     type Holding = { asset_id: string; value_selected?: number };
     const breakdown = (body as { holdings_breakdown: Holding[] }).holdings_breakdown;
     for (const h of breakdown) {
@@ -115,23 +158,18 @@ Deno.serve(async () => {
 
   // ── /portfolio — obsługa błędów ───────────────────────────────────────────
 
-  results.push(await run("portfolio: brak user_id → 400", async () => {
-    const { status } = await get("portfolio");
-    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
+  results.push(await run("portfolio: brak tokena → 401 (bramka verify_jwt)", async () => {
+    const status = await statusNoAuth("portfolio");
+    assert(status === 401, `Oczekiwano 401, dostałem ${status}`);
   }));
 
   results.push(await run("portfolio: currency=BTC (kategoria crypto, nie currency) → 400", async () => {
-    const { status } = await get(`portfolio?user_id=${TEST_USER_ID}&currency=BTC`);
+    const { status } = await get("portfolio?currency=BTC");
     assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
   }));
 
-  results.push(await run("portfolio: nieistniejący user_id → 404", async () => {
-    const { status } = await get("portfolio?user_id=00000000-0000-0000-0000-000000000000");
-    assert(status === 404, `Oczekiwano 404, dostałem ${status}`);
-  }));
-
   results.push(await run("portfolio: data bez snapshotu → 404", async () => {
-    const { status } = await get(`portfolio?user_id=${TEST_USER_ID}&date=2000-01-01`);
+    const { status } = await get("portfolio?date=2000-01-01");
     assert(status === 404, `Oczekiwano 404, dostałem ${status}`);
   }));
 
@@ -146,7 +184,7 @@ Deno.serve(async () => {
   }));
 
   results.push(await run(`portfolio historyczny ?date=${TODAY}: zwraca cron-snapshot`, async () => {
-    const { status, body } = await get(`portfolio?user_id=${TEST_USER_ID}&date=${TODAY}`);
+    const { status, body } = await get(`portfolio?date=${TODAY}`);
     assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
     const capturedAt = (body as { captured_at: string }).captured_at;
     assert(capturedAt.startsWith(TODAY), `captured_at powinno zaczynać się od ${TODAY}, jest ${capturedAt}`);
@@ -155,7 +193,7 @@ Deno.serve(async () => {
   }));
 
   results.push(await run(`portfolio historyczny ?date=${TODAY}&currency=EUR: ma value_selected`, async () => {
-    const { body } = await get(`portfolio?user_id=${TEST_USER_ID}&date=${TODAY}&currency=EUR`);
+    const { body } = await get(`portfolio?date=${TODAY}&currency=EUR`);
     type Holding = { asset_id: string; value_selected?: number };
     const eur = (body as { holdings_breakdown: Holding[] }).holdings_breakdown.find(h => h.asset_id === "EUR");
     assert(eur !== undefined, "Brak EUR w historycznym snapszotcie");
@@ -167,7 +205,7 @@ Deno.serve(async () => {
   // Live portfolio call wyżej zapisał visit-snapshot — teraz weryfikujemy że jest dostępny.
 
   results.push(await run("last-visit: zwraca 200 z captured_at i holdings_breakdown", async () => {
-    const { status, body } = await get(`last-visit?user_id=${TEST_USER_ID}`);
+    const { status, body } = await get("last-visit");
     assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
     assert(!!(body as { captured_at: string }).captured_at, "Brak pola captured_at");
     assert(Array.isArray((body as { holdings_breakdown: unknown[] }).holdings_breakdown),
@@ -175,7 +213,7 @@ Deno.serve(async () => {
   }));
 
   results.push(await run("last-visit ?currency=EUR: EUR value_selected=500", async () => {
-    const { body } = await get(`last-visit?user_id=${TEST_USER_ID}&currency=EUR`);
+    const { body } = await get("last-visit?currency=EUR");
     type Holding = { asset_id: string; value_selected?: number };
     const eur = (body as { holdings_breakdown: Holding[] }).holdings_breakdown.find(h => h.asset_id === "EUR");
     assert(eur !== undefined, "Brak EUR w last-visit");
@@ -183,66 +221,50 @@ Deno.serve(async () => {
       `Oczekiwano value_selected=500, jest ${eur!.value_selected}`);
   }));
 
-  results.push(await run("last-visit: brak user_id → 400", async () => {
-    const { status } = await get("last-visit");
-    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
-  }));
-
-  results.push(await run("last-visit: nieistniejący user → 404", async () => {
-    const { status } = await get("last-visit?user_id=00000000-0000-0000-0000-000000000000");
-    assert(status === 404, `Oczekiwano 404, dostałem ${status}`);
+  results.push(await run("last-visit: brak tokena → 401 (bramka verify_jwt)", async () => {
+    const status = await statusNoAuth("last-visit");
+    assert(status === 401, `Oczekiwano 401, dostałem ${status}`);
   }));
 
   // ── /snapshot-dates ───────────────────────────────────────────────────────
 
   results.push(await run("snapshot-dates: zwraca 200 z tablicą dates", async () => {
-    const { status, body } = await get(`snapshot-dates?user_id=${TEST_USER_ID}`);
+    const { status, body } = await get("snapshot-dates");
     assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
     assert(Array.isArray((body as { dates: string[] }).dates), "dates nie jest tablicą");
   }));
 
   results.push(await run("snapshot-dates: po snapszotcie zawiera dzisiejszą datę", async () => {
-    const { body } = await get(`snapshot-dates?user_id=${TEST_USER_ID}`);
+    const { body } = await get("snapshot-dates");
     const dates = (body as { dates: string[] }).dates;
     assert(dates.includes(TODAY), `Brak ${TODAY} w dates: [${dates.join(", ")}]`);
   }));
 
   results.push(await run("snapshot-dates: daty posortowane od najnowszej", async () => {
-    const { body } = await get(`snapshot-dates?user_id=${TEST_USER_ID}`);
+    const { body } = await get("snapshot-dates");
     const dates = (body as { dates: string[] }).dates;
     for (let i = 1; i < dates.length; i++) {
       assert(dates[i - 1] >= dates[i], `Daty nie są posortowane malejąco: ${dates[i - 1]} < ${dates[i]}`);
     }
   }));
 
-  results.push(await run("snapshot-dates: brak user_id → 400", async () => {
-    const { status } = await get("snapshot-dates");
-    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
-  }));
-
-  results.push(await run("snapshot-dates: nieistniejący user → pusta lista", async () => {
-    const { status, body } = await get("snapshot-dates?user_id=00000000-0000-0000-0000-000000000000");
-    assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
-    assert((body as { dates: string[] }).dates.length === 0, "Oczekiwano pustej tablicy dla nieznanego usera");
-  }));
-
   // ── /value-history ───────────────────────────────────────────────────────
 
   results.push(await run("value-history: zwraca 200 z currency=PLN i tablicą points", async () => {
-    const { status, body } = await get(`value-history?user_id=${TEST_USER_ID}`);
+    const { status, body } = await get("value-history");
     assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
     assert((body as { currency: string }).currency === "PLN", "Oczekiwano currency=PLN");
     assert(Array.isArray((body as { points: unknown[] }).points), "points nie jest tablicą");
   }));
 
   results.push(await run("value-history: ma >= 160 punktów (syntetyczne dane od 1 stycznia)", async () => {
-    const { body } = await get(`value-history?user_id=${TEST_USER_ID}`);
+    const { body } = await get("value-history");
     const len = (body as { points: unknown[] }).points.length;
     assert(len >= 160, `Oczekiwano >= 160 punktów, dostałem ${len}`);
   }));
 
   results.push(await run("value-history: punkty posortowane chronologicznie", async () => {
-    const { body } = await get(`value-history?user_id=${TEST_USER_ID}`);
+    const { body } = await get("value-history");
     const points = (body as { points: { date: string }[] }).points;
     for (let i = 1; i < points.length; i++) {
       assert(points[i - 1].date <= points[i].date,
@@ -252,8 +274,8 @@ Deno.serve(async () => {
 
   results.push(await run("value-history ?category_id=crypto: points mają wartość < całości portfela", async () => {
     const [{ body: total }, { body: crypto }] = await Promise.all([
-      get(`value-history?user_id=${TEST_USER_ID}`),
-      get(`value-history?user_id=${TEST_USER_ID}&category_id=crypto`),
+      get("value-history"),
+      get("value-history?category_id=crypto"),
     ]);
     const totalVal = ((total as { points: { value: number }[] }).points[0]?.value ?? 0);
     const cryptoVal = ((crypto as { points: { value: number }[] }).points[0]?.value ?? 0);
@@ -262,14 +284,14 @@ Deno.serve(async () => {
   }));
 
   results.push(await run("value-history ?asset_id=BTC: tylko BTC w każdym punkcie", async () => {
-    const { body } = await get(`value-history?user_id=${TEST_USER_ID}&asset_id=BTC`);
+    const { body } = await get("value-history?asset_id=BTC");
     const points = (body as { points: { value: number }[] }).points;
     assert(points.length >= 160, `Oczekiwano >= 160 punktów dla BTC, dostałem ${points.length}`);
     assert(points[0].value > 0, "Oczekiwano value > 0 dla BTC");
   }));
 
   results.push(await run("value-history ?currency=EUR: każdy punkt ma value_selected", async () => {
-    const { body } = await get(`value-history?user_id=${TEST_USER_ID}&currency=EUR`);
+    const { body } = await get("value-history?currency=EUR");
     const points = (body as { points: { value: number; value_selected?: number }[] }).points;
     for (const p of points) {
       assert(p.value_selected !== undefined, `Brak value_selected dla daty ${(p as unknown as { date: string }).date}`);
@@ -278,7 +300,7 @@ Deno.serve(async () => {
   }));
 
   results.push(await run("value-history ?from=&to=: filtrowanie zakresu dat", async () => {
-    const { body } = await get(`value-history?user_id=${TEST_USER_ID}&from=2026-01-01&to=2026-01-31`);
+    const { body } = await get("value-history?from=2026-01-01&to=2026-01-31");
     const points = (body as { points: { date: string }[] }).points;
     assert(points.length > 0, "Oczekiwano punktów w zakresie");
     for (const p of points) {
@@ -287,18 +309,8 @@ Deno.serve(async () => {
     }
   }));
 
-  results.push(await run("value-history: brak user_id → 400", async () => {
-    const { status } = await get("value-history");
-    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
-  }));
-
-  results.push(await run("value-history: nieistniejący user → 404", async () => {
-    const { status } = await get("value-history?user_id=00000000-0000-0000-0000-000000000000");
-    assert(status === 404, `Oczekiwano 404, dostałem ${status}`);
-  }));
-
   results.push(await run("value-history: currency=BTC (nie waluta) → 400", async () => {
-    const { status } = await get(`value-history?user_id=${TEST_USER_ID}&currency=BTC`);
+    const { status } = await get("value-history?currency=BTC");
     assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
   }));
 

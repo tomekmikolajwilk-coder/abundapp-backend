@@ -16,7 +16,7 @@ Deno.serve(async (req) => {
   console.log("=== portfolio START ===");
 
   const url = new URL(req.url);
-  const userId = resolveUserId(req, url);
+  const userId = resolveUserId(req);
   const dateParam = url.searchParams.get("date");
   const currencyParam = url.searchParams.get("currency")?.toUpperCase() ?? null;
 

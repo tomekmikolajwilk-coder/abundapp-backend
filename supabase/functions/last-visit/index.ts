@@ -14,7 +14,7 @@ Deno.serve(async (req) => {
   console.log("=== last-visit START ===");
 
   const url = new URL(req.url);
-  const userId = resolveUserId(req, url);
+  const userId = resolveUserId(req);
   const currencyParam = url.searchParams.get("currency")?.toUpperCase() ?? null;
 
   if (!userId) return badRequest("Missing user_id");

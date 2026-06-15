@@ -8,8 +8,7 @@ import { resolveUserId } from "../_shared/auth.ts";
 // Frontend używa tego żeby wiedzieć które opcje PnL są dostępne (wczoraj, SOW, SOM, SOY).
 // Jeśli brak snapshotu z danej daty — opcja nie jest wyświetlana.
 Deno.serve(async (req) => {
-  const url = new URL(req.url);
-  const userId = resolveUserId(req, url);
+  const userId = resolveUserId(req);
 
   if (!userId) return badRequest("Missing user_id");
 
