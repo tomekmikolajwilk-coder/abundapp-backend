@@ -50,6 +50,9 @@ verify_jwt = true
 [functions.value-history]
 verify_jwt = true
 
+[functions.holdings]
+verify_jwt = true
+
 [functions.fetch-prices]
 verify_jwt = false
 

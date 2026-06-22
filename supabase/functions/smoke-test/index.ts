@@ -93,6 +93,51 @@ Deno.serve(async () => {
     return res.status;
   }
 
+  // GET z pominięciem cache'a get() — potrzebne po mutacji holdings, żeby zobaczyć świeży stan.
+  async function freshGet(path: string): Promise<{ status: number; body: unknown }> {
+    const res = await fetch(`${BASE}/functions/v1/${path}`, { headers: AUTH_HEADERS });
+    return { status: res.status, body: await res.json() };
+  }
+
+  // POST/PATCH/DELETE z body JSON.
+  async function send(method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> {
+    const res = await fetch(`${BASE}/functions/v1/${path}`, {
+      method,
+      headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    try {
+      return { status: res.status, body: JSON.parse(text) };
+    } catch {
+      return { status: res.status, body: text };
+    }
+  }
+
+  // Mirror backendowego naliczania liniowego (musi zgadzać się z _shared/holdings.ts).
+  function bondFactor(rate: number, startDate: string, now: Date): number {
+    const start = Date.parse(`${startDate}T00:00:00Z`);
+    const days = Math.max(0, Math.floor((now.getTime() - start) / 86_400_000));
+    return 1 + (rate / 100) * (days / 365);
+  }
+
+  // Każdy testowy holding ma nazwę z tym prefiksem — pozwala posprzątać resztki po
+  // ewentualnym przerwanym przebiegu, zanim cache'owany /portfolio policzy pozycje.
+  const SMOKE_PREFIX = "__SMOKE__";
+  type Holding = { id?: string; asset_id: string | null; name?: string | null; price_source?: string };
+  async function sweepSmokeHoldings(): Promise<void> {
+    const { body } = await freshGet("portfolio");
+    const hs = (body as { holdings_breakdown?: Holding[] }).holdings_breakdown ?? [];
+    for (const h of hs) {
+      if (h.price_source === "manual" && typeof h.name === "string" && h.name.startsWith(SMOKE_PREFIX) && h.id) {
+        await send("DELETE", `holdings/${h.id}`);
+      }
+    }
+  }
+
+  // Czyścimy ewentualne resztki ZANIM get("portfolio") zmemoizuje liczbę pozycji.
+  await sweepSmokeHoldings();
+
   const results: TestResult[] = [];
 
   // ── /assets ───────────────────────────────────────────────────────────────
@@ -313,6 +358,97 @@ Deno.serve(async () => {
     const { status } = await get("value-history?currency=BTC");
     assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
   }));
+
+  // ── /holdings — CRUD + naliczanie obligacji ───────────────────────────────
+  // Pełny cykl POST→GET→PATCH→DELETE na manualnej obligacji. Sprzątamy po sobie,
+  // żeby liczba pozycji testowego usera wróciła do 10 (resztki łapie sweep wyżej).
+
+  results.push(await run("holdings: brak tokena → 401 (bramka verify_jwt)", async () => {
+    const res = await fetch(`${BASE}/functions/v1/holdings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category: "crypto", asset_id: "BTC", amount: 1 }),
+    });
+    await res.text();
+    assert(res.status === 401, `Oczekiwano 401, dostałem ${res.status}`);
+  }));
+
+  results.push(await run("holdings: market z nieznanym asset → 400", async () => {
+    const { status } = await send("POST", "holdings", { category: "crypto", asset_id: "NOPE", amount: 1 });
+    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
+  }));
+
+  results.push(await run("holdings: nieprawidłowa kategoria → 400", async () => {
+    const { status } = await send("POST", "holdings", { category: "spaceships", amount: 1 });
+    assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
+  }));
+
+  results.push(await run("holdings: PATCH nieistniejącego → 404", async () => {
+    const { status } = await send("PATCH", "holdings/00000000-0000-0000-0000-000000000000", { amount: 5 });
+    assert(status === 404, `Oczekiwano 404, dostałem ${status}`);
+  }));
+
+  results.push(await run("holdings: DELETE nieistniejącego → 404", async () => {
+    const { status } = await send("DELETE", "holdings/00000000-0000-0000-0000-000000000000");
+    assert(status === 404, `Oczekiwano 404, dostałem ${status}`);
+  }));
+
+  results.push(await run("holdings: cykl obligacji POST→/portfolio→PATCH→DELETE (liniowe odsetki)", async () => {
+    const START = "2025-06-22";       // ~rok wstecz względem dzisiaj
+    const RATE = 5;
+    const name = `${SMOKE_PREFIX} EDO`;
+
+    // POST manual bond
+    const created = await send("POST", "holdings", {
+      category: "bonds",
+      amount: 100,
+      custom: { name, unit_value: 1, currency: "PLN", interest_rate: RATE, start_date: START },
+    });
+    assert(created.status === 201, `POST: oczekiwano 201, dostałem ${created.status}`);
+    const h = created.body as { id: string; price_source: string; interest_rate: number };
+    assert(typeof h.id === "string" && h.id.length > 0, "POST: brak id w odpowiedzi");
+    assert(h.price_source === "manual", `POST: oczekiwano price_source=manual, jest ${h.price_source}`);
+    assert(h.interest_rate === RATE, `POST: oczekiwano interest_rate=${RATE}, jest ${h.interest_rate}`);
+    const id = h.id;
+
+    try {
+      // /portfolio pokazuje pozycję z poprawnie naliczoną wartością (PLN→USD→PLN się znosi)
+      const factor = bondFactor(RATE, START, new Date());
+      const { body: pBody } = await freshGet("portfolio");
+      const pos = (pBody as { holdings_breakdown: (Holding & { value_ccy: number; value_usd: number; price_usd: number; amount: number; interest_rate?: number })[] })
+        .holdings_breakdown.find((x) => x.id === id);
+      assert(pos !== undefined, "/portfolio: brak utworzonej pozycji");
+      assert(pos!.name === name, "/portfolio: zła nazwa pozycji");
+      assert(pos!.interest_rate === RATE, `/portfolio: oczekiwano interest_rate=${RATE}, jest ${pos!.interest_rate}`);
+      const expectedCcy = 100 * 1 * factor;
+      assert(Math.abs(pos!.value_ccy - expectedCcy) < 0.05,
+        `/portfolio: oczekiwano value_ccy≈${expectedCcy.toFixed(2)}, jest ${pos!.value_ccy}`);
+      assert(Math.abs(pos!.value_usd - pos!.amount * pos!.price_usd) < 0.01,
+        "/portfolio: niezmiennik value_usd = amount × price_usd złamany dla obligacji");
+
+      // PATCH amount → wartość rośnie proporcjonalnie
+      const patched = await send("PATCH", `holdings/${id}`, { amount: 200 });
+      assert(patched.status === 200, `PATCH: oczekiwano 200, dostałem ${patched.status}`);
+      const { body: pBody2 } = await freshGet("portfolio");
+      const pos2 = (pBody2 as { holdings_breakdown: (Holding & { value_ccy: number })[] })
+        .holdings_breakdown.find((x) => x.id === id);
+      const expectedCcy2 = 200 * 1 * factor;
+      assert(pos2 !== undefined && Math.abs(pos2!.value_ccy - expectedCcy2) < 0.05,
+        `/portfolio po PATCH: oczekiwano value_ccy≈${expectedCcy2.toFixed(2)}, jest ${pos2?.value_ccy}`);
+    } finally {
+      const del = await send("DELETE", `holdings/${id}`);
+      assert(del.status === 200, `DELETE: oczekiwano 200, dostałem ${del.status}`);
+    }
+
+    // Po sprzątnięciu portfel znów ma 10 pozycji i nie ma naszej obligacji
+    const { body: pBody3 } = await freshGet("portfolio");
+    const breakdown = (pBody3 as { holdings_breakdown: Holding[] }).holdings_breakdown;
+    assert(breakdown.find((x) => x.id === id) === undefined, "DELETE nie usunął pozycji z /portfolio");
+    assert(breakdown.length === 10, `Po sprzątnięciu oczekiwano 10 pozycji, jest ${breakdown.length}`);
+  }));
+
+  // Ostateczne sprzątanie na wypadek przerwania w połowie cyklu.
+  await sweepSmokeHoldings();
 
   // ── Podsumowanie ──────────────────────────────────────────────────────────
 

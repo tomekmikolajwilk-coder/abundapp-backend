@@ -86,11 +86,38 @@ Profil usera. Tworzony automatycznie triggerem przy rejestracji.
 |---------|-----|------|
 | `id` | uuid PK | FK → `auth.users(id)`, cascade |
 | `preferred_currency` | text | domyślnie `'USD'` |
-| `holdings` | jsonb | mapa `{ asset_id: amount }`, np. `{"BTC":0.25}` |
 | `created_at` / `updated_at` | timestamptz | |
 
 - Trigger `on_auth_user_created` → `handle_new_user()` auto-wstawia profil.
 - RLS: user czyta/edytuje tylko własny profil (`auth.uid() = id`).
+- Kolumna `holdings` (JSONB) **usunięta** (migracja 20260622) — pozycje portfela mieszkają
+  teraz w osobnej tabeli `holdings` (niżej), bo potrzebują stabilnego `id` i pól dla aktywów manualnych.
+
+### `holdings`
+Pozycje portfela usera — jedna pozycja = jeden wiersz ze stabilnym `id` (do PATCH/DELETE).
+Dwie klasy wg `price_source`:
+
+| Kolumna | Typ | Opis |
+|---------|-----|------|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `user_id` | uuid | FK → `auth.users(id)`, cascade |
+| `price_source` | text | `market` \| `manual` (CHECK) |
+| `category` | text | market: `crypto`/`stock`/`etf`/`metal`/`currency`; manual: `real_estate`/`valuables`/`bonds`/`deposits`/`other` (CHECK) |
+| `amount` | numeric | ilość; `> 0` (CHECK) |
+| `asset_id` | text | market: FK → `asset_definitions`; **null** dla manual |
+| `name` | text | manual: nazwa custom assetu; null dla market |
+| `unit_value` | numeric | manual: cena za 1 jednostkę w walucie `currency`; null dla market |
+| `currency` | text | manual: kod waluty `unit_value` (np. `PLN`, `USD`) |
+| `display_category` | text | nadpisanie kategorii wyświetlania (np. ETF→`bonds`); null = jak `category` |
+| `interest_rate` | numeric | roczna stopa % (tylko obligacje); null gdy brak |
+| `start_date` | date | początek naliczania odsetek (obligacje); null gdy brak |
+| `created_at` / `updated_at` | timestamptz | |
+
+- **CHECK kształtu:** `market` ⇒ `asset_id` ustawiony, pola manual null; `manual` ⇒ `name`+`unit_value`+`currency` ustawione, `asset_id` null.
+- **`market`** — cenę zna backend; `value_usd = amount × price_cache[asset_id]`.
+- **`manual`** — cenę podaje user; `value_ccy = amount × unit_value` (w `currency`), `value_usd` po przeliczeniu FX z `price_cache`.
+- **Obligacje (`bonds`)** — wartość naliczana **liniowo, on-read**: `value = principal × (1 + interest_rate/100 × dni_od_start_date/365)`, `principal = amount × unit_value`. Liczone od zera z liczby dni → idempotentne (pominięty/podwójny cron bez znaczenia, **nic nie inkrementujemy**).
+- RLS: user CRUD-uje tylko własne wiersze (`auth.uid() = user_id`); service_role pełny dostęp.
 
 ### `asset_definitions`
 Katalog wszystkich obsługiwanych aktywów — **źródło prawdy** dla `category`,
@@ -175,18 +202,27 @@ Licznik nieudanych prób pobrania ceny, per asset, w obrębie doby UTC.
 ### Kształt `HoldingEntry` (w `holdings_breakdown` i odpowiedziach)
 ```json
 {
+  "id": "8f3c…",
   "asset_id": "BTC",
   "category": "crypto",
   "amount": 0.25,
   "price_usd": 66928,
   "value_usd": 16732,
   "value_ccy": 61125.93,
-  "value_selected": 14418.42
+  "value_selected": 14418.42,
+  "price_source": "market",
+  "name": null,
+  "display_category": null,
+  "interest_rate": null
 }
 ```
-- `value_usd` = `amount × price_usd`
+- `value_usd` = `amount × price_usd` (niezmiennik trzyma się też dla manual — `price_usd` to wtedy efektywna cena jednostki w USD, z odsetkami dla obligacji)
 - `value_ccy` = wartość w `preferred_currency` usera
 - `value_selected` = wartość w `?currency=X` (pojawia się tylko gdy podano parametr)
+- `id` = id wiersza `holdings` (do PATCH/DELETE)
+- `price_source` = `market` \| `manual`; `name` = nazwa custom assetu (manual) / null (market);
+  `display_category` = nadpisanie kategorii lub null; `interest_rate` = stopa obligacji lub null
+- **Wstecznie:** stare snapshoty (sprzed migracji) nie mają tych pól — frontend czyta je z domyślnymi (`price_source`→`market`, reszta null).
 
 ---
 
@@ -199,6 +235,11 @@ Aktywo opisują **dwie niezależne osie** — nie sklejać ich:
 
 Przykład: REIT = `category 'real_estate'` + `api_source 'twelve_data'`; fizyczne mieszkanie =
 `category 'real_estate'` + `api_source null`. Ta sama klasa aktywa, inny sposób wyceny.
+
+Po stronie **pozycji portfela** ta druga oś jest już zrealizowana przez `holdings.price_source`
+(`market` = wycena z `price_cache`, `manual` = `unit_value` od usera). `asset_definitions` to
+katalog assetów `market`; pozycje `manual` (nieruchomości, obligacje, lokaty…) nie mają tam wpisu —
+niosą własną nazwę i cenę w wierszu `holdings`.
 
 ### Aktualny katalog (`asset_definitions`)
 | Kategoria | Aktywne | Uwagi |
@@ -244,8 +285,8 @@ Wszystkie aktywne aktywa z aktualnym kursem, pogrupowane po kategorii.
 ```
 
 ### `GET /portfolio`
-Live portfolio — liczone na bieżąco z `profiles.holdings × price_cache`.
-Każde wywołanie zapisuje w tle visit-snapshot (`EdgeRuntime.waitUntil`).
+Live portfolio — liczone na bieżąco z `holdings × price_cache`.
+Każde wywołanie zapisuje synchronicznie visit-snapshot (jeden wiersz na usera).
 ```json
 {
   "currency": "PLN",
@@ -296,6 +337,35 @@ Parametry opcjonalne:
 - **`&asset_id=BTC`** — tylko ten asset.
 - **`&currency=EUR`** — dodaje `value_selected` per punkt.
 - **`&from=2026-01-01&to=2026-03-31`** — filtr zakresu dat.
+
+### `POST /holdings`
+Dodaje pozycję do portfela. `user_id` z JWT. Zwraca `201` z utworzonym wierszem (z `id`).
+
+**market** (cenę zna backend):
+```json
+{ "category": "crypto", "asset_id": "BTC", "amount": 0.25, "display_category": null }
+```
+- `category` ∈ market (`crypto`/`stock`/`etf`/`metal`/`currency`), `asset_id` musi istnieć i być aktywny w `asset_definitions`, a jego kategoria musi zgadzać się z `category`.
+- `display_category` opcjonalne (np. ETF obligacyjny → `bonds`).
+
+**manual** (cenę podaje user):
+```json
+{ "category": "bonds", "amount": 100,
+  "custom": { "name": "Obligacje EDO", "unit_value": 1, "currency": "PLN",
+              "display_category": null, "interest_rate": 5, "start_date": "2026-01-01" } }
+```
+- `category` ∈ manual (`real_estate`/`valuables`/`bonds`/`deposits`/`other`).
+- `custom.unit_value > 0`, `custom.currency` = `USD` lub aktywna waluta z katalogu.
+- Obligacje: `interest_rate` opcjonalne; `start_date` opcjonalne (`YYYY-MM-DD`, domyślnie dziś).
+- `400` przy złej kategorii / nieznanym asset / brakującym polu.
+
+### `PATCH /holdings/:id`
+Edycja istniejącej pozycji usera. Body: `{ "amount"?: number, "unit_value"?: number }`.
+- `amount` dla obu klas; `unit_value` tylko dla `manual` (na market → `400`).
+- `404` gdy pozycja nie należy do usera / nie istnieje.
+
+### `DELETE /holdings/:id`
+Usuwa pozycję usera. Zwraca `{ "deleted": true, "id": "…" }`. `404` gdy nie znaleziono.
 
 ---
 
@@ -384,7 +454,7 @@ Kształt błędu: `{ "error": "opis" }`. Funkcje cron zwracają na błędzie `{ 
   `SMOKE_TEST_PASSWORD`) i dopiero tym tokenem odpytuje endpointy per-user. Deploy bez flagi
   `--no-verify-jwt` — bramka sterowana per-funkcja z `config.toml`.
 - **Nowy user bez danych:** profil zakładany automatycznie triggerem `on_auth_user_created`
-  przy rejestracji (pusty `holdings` → `portfolio` zwraca `holdings_breakdown: []`, nie 404).
+  przy rejestracji (brak wierszy w `holdings` → `portfolio` zwraca `holdings_breakdown: []`, nie 404).
   `last-visit` bez wizyt → 404 (oczekiwane, frontend to obsługuje).
 
 ---
@@ -393,7 +463,7 @@ Kształt błędu: `{ "error": "opis" }`. Funkcje cron zwracają na błędzie `{ 
 
 - **UUID:** `4ff2377f-a833-4a05-9930-391d84d4182d`
 - **preferred_currency:** PLN
-- **holdings (10 aktywów):** BTC=0.25, ETH=2, SOL=15, AAPL=10, MSFT=5, GOOGL=3, XAU=2, EUR=500, SPY=12, QQQ=8
+- **holdings (10 aktywów, tabela `holdings`, wszystkie `market`):** BTC=0.25, ETH=2, SOL=15, AAPL=10, MSFT=5, GOOGL=3, XAU=2, EUR=500, SPY=12, QQQ=8
 - Cron-snapshoty od 1 stycznia generowane syntetycznie z realistyczną oscylacją ceny
   (ten sam zestaw 10 aktywów co żywy portfel).
 

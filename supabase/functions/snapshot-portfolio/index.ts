@@ -2,7 +2,7 @@ import { getServiceClient } from "../_shared/supabase.ts";
 import { json } from "../_shared/http.ts";
 import { sendAlertEmail, writeCronLog } from "../_shared/alerts.ts";
 import { buildPriceMap } from "../_shared/pricing.ts";
-import type { HoldingEntry } from "../_shared/types.ts";
+import { buildBreakdown, HOLDINGS_COLUMNS, type HoldingRow } from "../_shared/holdings.ts";
 
 // Wywoływana przez pg_cron raz dziennie — zapisuje stan portfela wszystkich userów.
 Deno.serve(async () => {
@@ -11,10 +11,11 @@ Deno.serve(async () => {
   const supabase = getServiceClient();
 
   try {
-    const [pricesResult, profilesResult, defsResult] = await Promise.all([
+    const [pricesResult, profilesResult, defsResult, holdingsResult] = await Promise.all([
       supabase.from("price_cache").select("asset_id, price_usd"),
-      supabase.from("profiles").select("id, preferred_currency, holdings"),
+      supabase.from("profiles").select("id, preferred_currency"),
       supabase.from("asset_definitions").select("asset_id, category").eq("active", true),
+      supabase.from("holdings").select(`user_id, ${HOLDINGS_COLUMNS}`),
     ]);
 
     if (pricesResult.error || !pricesResult.data) {
@@ -23,9 +24,20 @@ Deno.serve(async () => {
     if (profilesResult.error || !profilesResult.data) {
       throw new Error(`Failed to fetch profiles: ${profilesResult.error?.message}`);
     }
+    if (holdingsResult.error || !holdingsResult.data) {
+      throw new Error(`Failed to fetch holdings: ${holdingsResult.error?.message}`);
+    }
 
     const profiles = profilesResult.data;
     console.log(`[snapshot] ${profiles.length} users, ${pricesResult.data.length} assets in price_cache`);
+
+    // Grupujemy holdingi po user_id — jedna pętla zamiast pytania per user.
+    const holdingsByUser = new Map<string, HoldingRow[]>();
+    for (const row of holdingsResult.data as (HoldingRow & { user_id: string })[]) {
+      const list = holdingsByUser.get(row.user_id) ?? [];
+      list.push(row);
+      holdingsByUser.set(row.user_id, list);
+    }
 
     // Mapa asset_id → { price_usd, category } (category z asset_definitions — źródła prawdy).
     const priceMap = buildPriceMap(pricesResult.data, defsResult.data ?? []);
@@ -51,27 +63,13 @@ Deno.serve(async () => {
 
     const snapshots = profiles.map((profile) => {
       const currency = profile.preferred_currency as string;
-      const holdings = profile.holdings as Record<string, number>;
-      const ccyPrice = priceMap[currency]?.price_usd ?? null;
+      const rows = holdingsByUser.get(profile.id) ?? [];
 
-      if (!ccyPrice) {
-        const w = `User ${profile.id}: currency ${currency} not in price_cache`;
-        console.warn(`[snapshot] ⚠️ ${w}`);
-        warnings.push(w);
-      }
-
-      const breakdown: HoldingEntry[] = [];
-      for (const [asset_id, amount] of Object.entries(holdings)) {
-        const info = priceMap[asset_id];
-        if (!info) {
-          const w = `User ${profile.id}: brak kursu dla ${asset_id}`;
-          console.warn(`[snapshot] ⚠️ ${w}`);
-          warnings.push(w);
-          continue;
-        }
-        const value_usd = amount * info.price_usd;
-        const value_ccy = ccyPrice != null ? value_usd / ccyPrice : value_usd;
-        breakdown.push({ asset_id, category: info.category, amount, price_usd: info.price_usd, value_usd, value_ccy });
+      const { breakdown, warnings: userWarnings } = buildBreakdown(rows, priceMap, currency, null, now);
+      for (const w of userWarnings) {
+        const msg = `User ${profile.id}: ${w}`;
+        console.warn(`[snapshot] ⚠️ ${msg}`);
+        warnings.push(msg);
       }
 
       return {

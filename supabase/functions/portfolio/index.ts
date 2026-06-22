@@ -3,10 +3,8 @@ import { badRequest, json, notFound, serverError } from "../_shared/http.ts";
 import { resolveSelectedCurrency } from "../_shared/currency.ts";
 import { resolveUserId } from "../_shared/auth.ts";
 import { buildPriceMap } from "../_shared/pricing.ts";
+import { buildBreakdown, HOLDINGS_COLUMNS } from "../_shared/holdings.ts";
 import type { HoldingEntry } from "../_shared/types.ts";
-
-// Globalny obiekt runtime'u Supabase Edge — pozwala dokończyć zadanie w tle po wysłaniu odpowiedzi.
-declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void } | undefined;
 
 // GET /portfolio?user_id=UUID
 // GET /portfolio?user_id=UUID&date=2026-06-03              → ostatni snapshot z tego dnia
@@ -75,77 +73,59 @@ Deno.serve(async (req) => {
     });
   }
 
-  // ── LIVE: liczymy na bieżąco z profiles + price_cache + asset_definitions ──
-  const [profileResult, pricesResult, defsResult] = await Promise.all([
-    supabase.from("profiles").select("preferred_currency, holdings").eq("id", userId).single(),
+  // ── LIVE: liczymy na bieżąco z holdings + price_cache + asset_definitions ──
+  const [profileResult, pricesResult, defsResult, holdingsResult] = await Promise.all([
+    supabase.from("profiles").select("preferred_currency").eq("id", userId).single(),
     supabase.from("price_cache").select("asset_id, price_usd"),
     supabase.from("asset_definitions").select("asset_id, category").eq("active", true),
+    supabase.from("holdings").select(HOLDINGS_COLUMNS).eq("user_id", userId),
   ]);
 
   if (profileResult.error || !profileResult.data) return notFound("User profile not found");
   if (pricesResult.error || !pricesResult.data) return serverError("Failed to fetch prices");
+  if (holdingsResult.error) return serverError("Failed to fetch holdings");
 
-  const { preferred_currency, holdings } = profileResult.data;
+  const { preferred_currency } = profileResult.data;
 
   // Mapa asset_id → { price_usd, category } (category z asset_definitions — źródła prawdy).
   const priceMap = buildPriceMap(pricesResult.data, defsResult.data ?? []);
 
-  const ccyPrice = priceMap[preferred_currency]?.price_usd ?? null;
-  if (!ccyPrice) {
-    console.warn(`[portfolio] preferred_currency ${preferred_currency} not found in price_cache`);
-  }
+  const { breakdown, warnings } = buildBreakdown(
+    holdingsResult.data ?? [],
+    priceMap,
+    preferred_currency,
+    selectedCurrencyPrice,
+    new Date(),
+  );
+  for (const w of warnings) console.warn(`[portfolio] ${w}`);
 
-  const breakdown: HoldingEntry[] = [];
-  for (const [asset_id, amount] of Object.entries(holdings as Record<string, number>)) {
-    const info = priceMap[asset_id];
-    if (!info) {
-      console.warn(`[portfolio] No price for ${asset_id}, skipping`);
-      continue;
-    }
-    const value_usd = (amount as number) * info.price_usd;
-    const value_ccy = ccyPrice != null ? value_usd / ccyPrice : value_usd;
-    const entry: HoldingEntry = {
-      asset_id,
-      category: info.category,
-      amount: amount as number,
-      price_usd: info.price_usd,
-      value_usd,
-      value_ccy,
-    };
-    if (selectedCurrencyPrice !== null) {
-      entry.value_selected = value_usd / selectedCurrencyPrice;
-    }
-    breakdown.push(entry);
-  }
+  // Zapisujemy snapshot wizyty — dokładnie jeden wiersz na usera. Pilnuje tego partial
+  // unique index `(user_id) where source='visit'`, dlatego MUSIMY skasować poprzedni
+  // ZANIM wstawimy nowy (insert-przed-delete złamałby ten index).
+  //
+  // Robimy to SYNCHRONICZNIE (await), nie w tle. Wcześniej szło to przez EdgeRuntime.waitUntil,
+  // ale na cold-starcie runtime potrafił ubić workera tuż po wysłaniu odpowiedzi — delete się
+  // commitował, insert już nie → user zostawał z ZEREM wierszy visit (i "PnL od ostatniej
+  // wizyty" przestawał działać). Koszt to jeden dodatkowy round-trip do DB; w zamian zapis
+  // jest pewny, a ewentualny błąd widać od razu w logach.
+  const { error: delErr } = await supabase
+    .from("portfolio_snapshots")
+    .delete()
+    .eq("user_id", userId)
+    .eq("source", "visit");
 
-  // Zapisujemy snapshot wizyty — zawsze tylko jeden wiersz na usera (ostatnia wizyta).
-  // Najpierw usuwamy poprzedni, potem wstawiamy nowy.
-  // Tło — nie blokujemy odpowiedzi, błąd zapisu nie failuje requestu. EdgeRuntime.waitUntil
-  // trzyma workera przy życiu aż delete+insert się dokończą; bez tego runtime ubija
-  // niezakończoną promesę zaraz po response (gubiony visit-snapshot, zwłaszcza na cold-starcie).
-  const saveVisitSnapshot = (async () => {
-    await supabase
-      .from("portfolio_snapshots")
-      .delete()
-      .eq("user_id", userId)
-      .eq("source", "visit");
+  if (delErr) console.warn(`[portfolio] Nie udało się skasować starego visit snapshot: ${delErr.message}`);
 
-    const { error } = await supabase.from("portfolio_snapshots").insert({
-      user_id: userId,
-      currency: preferred_currency,
-      holdings_breakdown: breakdown,
-      captured_at: new Date().toISOString(),
-      source: "visit",
-    });
+  const { error: insErr } = await supabase.from("portfolio_snapshots").insert({
+    user_id: userId,
+    currency: preferred_currency,
+    holdings_breakdown: breakdown,
+    captured_at: new Date().toISOString(),
+    source: "visit",
+  });
 
-    if (error) console.warn(`[portfolio] Nie udało się zapisać visit snapshot: ${error.message}`);
-    else console.log(`[portfolio] Visit snapshot saved`);
-  })();
-
-  // EdgeRuntime to globalny obiekt środowiska Supabase (poza nim — np. w testach — nie istnieje).
-  if (typeof EdgeRuntime !== "undefined") {
-    EdgeRuntime.waitUntil(saveVisitSnapshot);
-  }
+  if (insErr) console.warn(`[portfolio] Nie udało się zapisać visit snapshot: ${insErr.message}`);
+  else console.log(`[portfolio] Visit snapshot saved`);
 
   console.log(`[portfolio] live — ${breakdown.length} assets, currency=${preferred_currency}`);
   console.log("=== portfolio DONE ===");
