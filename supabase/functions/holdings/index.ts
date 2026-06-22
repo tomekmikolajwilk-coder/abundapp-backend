@@ -26,18 +26,24 @@ Deno.serve(async (req) => {
 
   const supabase = getServiceClient();
 
-  switch (req.method) {
-    case "POST":
-      if (id) return badRequest("POST nie przyjmuje id w ścieżce");
-      return await createHolding(supabase, userId, req);
-    case "PATCH":
-      if (!id) return badRequest("PATCH wymaga /holdings/:id");
-      return await patchHolding(supabase, userId, id, req);
-    case "DELETE":
-      if (!id) return badRequest("DELETE wymaga /holdings/:id");
-      return await deleteHolding(supabase, userId, id);
-    default:
-      return badRequest(`Nieobsługiwana metoda ${req.method}`);
+  try {
+    switch (req.method) {
+      case "POST":
+        if (id) return badRequest("POST nie przyjmuje id w ścieżce");
+        return await createHolding(supabase, userId, req);
+      case "PATCH":
+        if (!id) return badRequest("PATCH wymaga /holdings/:id");
+        return await patchHolding(supabase, userId, id, req);
+      case "DELETE":
+        if (!id) return badRequest("DELETE wymaga /holdings/:id");
+        return await deleteHolding(supabase, userId, id);
+      default:
+        return badRequest(`Nieobsługiwana metoda ${req.method}`);
+    }
+  } catch (err) {
+    // Spójny 500 { error } zamiast plain-text "Internal Server Error" z runtime'u.
+    console.error(`[holdings] ERROR: ${String(err)}`);
+    return serverError(String(err));
   }
 });
 

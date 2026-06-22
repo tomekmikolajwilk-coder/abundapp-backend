@@ -11,6 +11,7 @@ import type { HoldingEntry } from "../_shared/types.ts";
 // GET /portfolio?user_id=UUID&date=2026-06-03T10:30:00Z    → ostatni snapshot przed tym momentem
 // GET /portfolio?user_id=UUID&currency=EUR                 → dodatkowe przeliczenie na EUR
 Deno.serve(async (req) => {
+ try {
   console.log("=== portfolio START ===");
 
   const url = new URL(req.url);
@@ -131,4 +132,10 @@ Deno.serve(async (req) => {
   console.log("=== portfolio DONE ===");
 
   return json({ currency: preferred_currency, holdings_breakdown: breakdown });
+ } catch (err) {
+  // Bez tego runtime zwracał plain-text "Internal Server Error" (nie-JSON), co wywracało
+  // smoke-test i jq. Łapiemy, logujemy i oddajemy spójny 500 { error } z treścią błędu.
+  console.error(`[portfolio] ERROR: ${String(err)}`);
+  return serverError(String(err));
+ }
 });

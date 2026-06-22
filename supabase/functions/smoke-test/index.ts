@@ -76,12 +76,23 @@ Deno.serve(async () => {
 
   // Pomocnik — robi GET i parsuje JSON. Memoizowany: ten sam URL fetchy tylko raz,
   // kolejne wywołania zwracają z cache'a — mniej requestów, mniej rate-limitu.
+  // Parsuje odpowiedź jako JSON, ale NIGDY nie rzuca — gdy funkcja padnie i zwróci
+  // czysty tekst (np. runtime'owe "Internal Server Error"), oddajemy { __nonJson, status }
+  // zamiast wywalać cały smoke-test. Dzięki temu konkretny test złapie błąd i go zaraportuje.
+  async function readBody(res: Response): Promise<unknown> {
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { __nonJson: text, __status: res.status };
+    }
+  }
+
   const responseCache = new Map<string, { status: number; body: unknown }>();
   async function get(path: string): Promise<{ status: number; body: unknown }> {
     if (responseCache.has(path)) return responseCache.get(path)!;
     const res = await fetch(`${BASE}/functions/v1/${path}`, { headers: AUTH_HEADERS });
-    const body = await res.json();
-    const result = { status: res.status, body };
+    const result = { status: res.status, body: await readBody(res) };
     responseCache.set(path, result);
     return result;
   }
@@ -96,7 +107,7 @@ Deno.serve(async () => {
   // GET z pominięciem cache'a get() — potrzebne po mutacji holdings, żeby zobaczyć świeży stan.
   async function freshGet(path: string): Promise<{ status: number; body: unknown }> {
     const res = await fetch(`${BASE}/functions/v1/${path}`, { headers: AUTH_HEADERS });
-    return { status: res.status, body: await res.json() };
+    return { status: res.status, body: await readBody(res) };
   }
 
   // POST/PATCH/DELETE z body JSON.
@@ -106,12 +117,7 @@ Deno.serve(async () => {
       headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    const text = await res.text();
-    try {
-      return { status: res.status, body: JSON.parse(text) };
-    } catch {
-      return { status: res.status, body: text };
-    }
+    return { status: res.status, body: await readBody(res) };
   }
 
   // Mirror backendowego naliczania liniowego (musi zgadzać się z _shared/holdings.ts).
@@ -160,7 +166,7 @@ Deno.serve(async () => {
 
   results.push(await run("portfolio live: zwraca 200 i currency=PLN", async () => {
     const { status, body } = await get("portfolio");
-    assert(status === 200, `Oczekiwano 200, dostałem ${status}`);
+    assert(status === 200, `Oczekiwano 200, dostałem ${status} — body: ${JSON.stringify(body)}`);
     assert((body as { currency: string }).currency === "PLN", "Oczekiwano currency=PLN");
   }));
 
