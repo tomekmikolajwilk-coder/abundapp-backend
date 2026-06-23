@@ -80,7 +80,13 @@ Deno.serve(async () => {
   // czysty tekst (np. runtime'owe "Internal Server Error"), oddajemy { __nonJson, status }
   // zamiast wywalać cały smoke-test. Dzięki temu konkretny test złapie błąd i go zaraportuje.
   async function readBody(res: Response): Promise<unknown> {
-    const text = await res.text();
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (e) {
+      // Połączenie zerwane w trakcie czytania (np. wywołana funkcja padła twardo).
+      return { __readError: String(e), __status: res.status };
+    }
     try {
       return JSON.parse(text);
     } catch {
@@ -88,36 +94,52 @@ Deno.serve(async () => {
     }
   }
 
+  // Jeden punkt fetchowania, który NIGDY nie rzuca: błąd sieciowy (odrzucony fetch,
+  // zerwane połączenie do funkcji, która się wywaliła) zwracamy jako { status:0, body }.
+  // Bez tego niezabezpieczony fetch w sweepie ubijał cały smoke-test (HTTP 500 plain-text).
+  async function safeFetch(
+    path: string,
+    init?: RequestInit,
+  ): Promise<{ status: number; body: unknown }> {
+    try {
+      const res = await fetch(`${BASE}/functions/v1/${path}`, init);
+      return { status: res.status, body: await readBody(res) };
+    } catch (e) {
+      return { status: 0, body: { __fetchError: String(e) } };
+    }
+  }
+
   const responseCache = new Map<string, { status: number; body: unknown }>();
   async function get(path: string): Promise<{ status: number; body: unknown }> {
     if (responseCache.has(path)) return responseCache.get(path)!;
-    const res = await fetch(`${BASE}/functions/v1/${path}`, { headers: AUTH_HEADERS });
-    const result = { status: res.status, body: await readBody(res) };
+    const result = await safeFetch(path, { headers: AUTH_HEADERS });
     responseCache.set(path, result);
     return result;
   }
 
   // Wywołanie BEZ żadnego tokena — sprawdza, że bramka verify_jwt odrzuca (401).
   async function statusNoAuth(path: string): Promise<number> {
-    const res = await fetch(`${BASE}/functions/v1/${path}`);
-    await res.text(); // drain
-    return res.status;
+    try {
+      const res = await fetch(`${BASE}/functions/v1/${path}`);
+      await res.text(); // drain
+      return res.status;
+    } catch {
+      return 0;
+    }
   }
 
   // GET z pominięciem cache'a get() — potrzebne po mutacji holdings, żeby zobaczyć świeży stan.
   async function freshGet(path: string): Promise<{ status: number; body: unknown }> {
-    const res = await fetch(`${BASE}/functions/v1/${path}`, { headers: AUTH_HEADERS });
-    return { status: res.status, body: await readBody(res) };
+    return await safeFetch(path, { headers: AUTH_HEADERS });
   }
 
   // POST/PATCH/DELETE z body JSON.
   async function send(method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> {
-    const res = await fetch(`${BASE}/functions/v1/${path}`, {
+    return await safeFetch(path, {
       method,
       headers: { ...AUTH_HEADERS, "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    return { status: res.status, body: await readBody(res) };
   }
 
   // Mirror backendowego naliczania liniowego (musi zgadzać się z _shared/holdings.ts).
@@ -141,10 +163,10 @@ Deno.serve(async () => {
     }
   }
 
+  const results: TestResult[] = [];
+ try {
   // Czyścimy ewentualne resztki ZANIM get("portfolio") zmemoizuje liczbę pozycji.
   await sweepSmokeHoldings();
-
-  const results: TestResult[] = [];
 
   // ── /assets ───────────────────────────────────────────────────────────────
 
@@ -477,4 +499,19 @@ Deno.serve(async () => {
       headers: { "Content-Type": "application/json" },
     }
   );
+ } catch (err) {
+  // Siatka bezpieczeństwa: cokolwiek nieprzewidzianego rzuci poza run(), i tak oddajemy
+  // JSON z dotychczasowymi wynikami — CI dostaje parsowalny raport zamiast plain-text 500.
+  console.error(`[smoke-test] FATAL: ${String(err)}`);
+  return new Response(
+    JSON.stringify({
+      fatal: String(err),
+      passed: results.filter((r) => r.passed).length,
+      failed: results.filter((r) => !r.passed).length,
+      total: results.length,
+      results,
+    }, null, 2),
+    { status: 500, headers: { "Content-Type": "application/json" } },
+  );
+ }
 });
