@@ -442,9 +442,11 @@ Deno.serve(async () => {
     try {
       // /portfolio pokazuje pozycję z poprawnie naliczoną wartością (PLN→USD→PLN się znosi)
       const factor = bondFactor(RATE, START, new Date());
-      const { body: pBody } = await freshGet("portfolio");
-      const pos = (pBody as { holdings_breakdown: (Holding & { value_ccy: number; value_usd: number; price_usd: number; amount: number; interest_rate?: number })[] })
-        .holdings_breakdown.find((x) => x.id === id);
+      const pRes = await freshGet("portfolio");
+      const pBody = pRes.body as { holdings_breakdown?: (Holding & { value_ccy: number; value_usd: number; price_usd: number; amount: number; interest_rate?: number })[] };
+      assert(Array.isArray(pBody.holdings_breakdown),
+        `/portfolio nie zwrócił holdings_breakdown — status ${pRes.status}, body: ${JSON.stringify(pRes.body)}`);
+      const pos = pBody.holdings_breakdown!.find((x) => x.id === id);
       assert(pos !== undefined, "/portfolio: brak utworzonej pozycji");
       assert(pos!.name === name, "/portfolio: zła nazwa pozycji");
       assert(pos!.interest_rate === RATE, `/portfolio: oczekiwano interest_rate=${RATE}, jest ${pos!.interest_rate}`);
