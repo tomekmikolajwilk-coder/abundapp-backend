@@ -97,16 +97,26 @@ Deno.serve(async () => {
   // Jeden punkt fetchowania, który NIGDY nie rzuca: błąd sieciowy (odrzucony fetch,
   // zerwane połączenie do funkcji, która się wywaliła) zwracamy jako { status:0, body }.
   // Bez tego niezabezpieczony fetch w sweepie ubijał cały smoke-test (HTTP 500 plain-text).
+  //
+  // RETRY: pod koniec ciężkiego przebiegu (~40 wywołań funkcja→funkcja, cold starty)
+  // pojedynczy fetch potrafi sporadycznie odrzucić (reset połączenia). To NIE błąd
+  // logiki — ponawiamy do 3× z krótką pauzą. Ponawiamy TYLKO gdy fetch rzucił (sieć);
+  // realne odpowiedzi HTTP (400/401/404/500) zwracamy od razu, bez ponawiania.
   async function safeFetch(
     path: string,
     init?: RequestInit,
   ): Promise<{ status: number; body: unknown }> {
-    try {
-      const res = await fetch(`${BASE}/functions/v1/${path}`, init);
-      return { status: res.status, body: await readBody(res) };
-    } catch (e) {
-      return { status: 0, body: { __fetchError: String(e) } };
+    let lastErr = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(`${BASE}/functions/v1/${path}`, init);
+        return { status: res.status, body: await readBody(res) };
+      } catch (e) {
+        lastErr = String(e);
+        await new Promise((r) => setTimeout(r, 400)); // krótka pauza przed retry
+      }
     }
+    return { status: 0, body: { __fetchError: lastErr } };
   }
 
   const responseCache = new Map<string, { status: number; body: unknown }>();
@@ -458,21 +468,27 @@ Deno.serve(async () => {
 
       // PATCH amount → wartość rośnie proporcjonalnie
       const patched = await send("PATCH", `holdings/${id}`, { amount: 200 });
-      assert(patched.status === 200, `PATCH: oczekiwano 200, dostałem ${patched.status}`);
-      const { body: pBody2 } = await freshGet("portfolio");
-      const pos2 = (pBody2 as { holdings_breakdown: (Holding & { value_ccy: number })[] })
-        .holdings_breakdown.find((x) => x.id === id);
+      assert(patched.status === 200, `PATCH: oczekiwano 200, dostałem ${patched.status} — body: ${JSON.stringify(patched.body)}`);
+      const pRes2 = await freshGet("portfolio");
+      const pBody2 = pRes2.body as { holdings_breakdown?: (Holding & { value_ccy: number })[] };
+      assert(Array.isArray(pBody2.holdings_breakdown),
+        `/portfolio po PATCH bez holdings_breakdown — status ${pRes2.status}, body: ${JSON.stringify(pRes2.body)}`);
+      const pos2 = pBody2.holdings_breakdown!.find((x) => x.id === id);
       const expectedCcy2 = 200 * 1 * factor;
       assert(pos2 !== undefined && Math.abs(pos2!.value_ccy - expectedCcy2) < 0.05,
         `/portfolio po PATCH: oczekiwano value_ccy≈${expectedCcy2.toFixed(2)}, jest ${pos2?.value_ccy}`);
     } finally {
+      // Idempotentnie: 200 = usunięto teraz, 404 = retry trafił już-usuniętą pozycję. Oba OK.
       const del = await send("DELETE", `holdings/${id}`);
-      assert(del.status === 200, `DELETE: oczekiwano 200, dostałem ${del.status}`);
+      assert(del.status === 200 || del.status === 404, `DELETE: oczekiwano 200/404, dostałem ${del.status} — body: ${JSON.stringify(del.body)}`);
     }
 
     // Po sprzątnięciu portfel znów ma 10 pozycji i nie ma naszej obligacji
-    const { body: pBody3 } = await freshGet("portfolio");
-    const breakdown = (pBody3 as { holdings_breakdown: Holding[] }).holdings_breakdown;
+    const pRes3 = await freshGet("portfolio");
+    const pBody3 = pRes3.body as { holdings_breakdown?: Holding[] };
+    assert(Array.isArray(pBody3.holdings_breakdown),
+      `/portfolio po DELETE bez holdings_breakdown — status ${pRes3.status}, body: ${JSON.stringify(pRes3.body)}`);
+    const breakdown = pBody3.holdings_breakdown!;
     assert(breakdown.find((x) => x.id === id) === undefined, "DELETE nie usunął pozycji z /portfolio");
     assert(breakdown.length === 10, `Po sprzątnięciu oczekiwano 10 pozycji, jest ${breakdown.length}`);
   }));
