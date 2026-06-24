@@ -183,13 +183,15 @@ Deno.serve(async () => {
     assert((body as { currency: string }).currency === "PLN", "Oczekiwano currency=PLN");
   }));
 
-  results.push(await run("portfolio live: ma 10 pozycji w holdings_breakdown", async () => {
+  results.push(await run("portfolio live: zawiera 10 zalążkowych aktywów market", async () => {
+    // Konto testowe jest podpięte pod frontend (user może dodawać/edytować pozycje przez
+    // /holdings), więc NIE zakładamy sztywnej liczby pozycji. Sprawdzamy tylko, że wszystkie
+    // zalążkowe aktywa market wciąż są — odporne na własne dodatki usera i testowe obligacje.
     const { body } = await get("portfolio");
-    // Liczymy tylko realne pozycje usera — pomijamy ewentualną testową obligację
-    // (gdyby DELETE z poprzedniego przebiegu nie zdążył), żeby liczba była stabilna.
-    const real = (body as { holdings_breakdown: Holding[] }).holdings_breakdown
-      .filter((h) => !(typeof h.name === "string" && h.name.startsWith(SMOKE_PREFIX)));
-    assert(real.length === 10, `Oczekiwano 10 realnych pozycji, dostałem ${real.length}`);
+    const ids = new Set((body as { holdings_breakdown: Holding[] }).holdings_breakdown.map((h) => h.asset_id));
+    const seed = ["BTC", "ETH", "SOL", "AAPL", "MSFT", "GOOGL", "XAU", "EUR", "SPY", "QQQ"];
+    const missing = seed.filter((a) => !ids.has(a));
+    assert(missing.length === 0, `Brak zalążkowych aktywów: ${missing.join(", ")}`);
   }));
 
   results.push(await run("portfolio live: value_usd = amount * price_usd dla każdej pozycji", async () => {
