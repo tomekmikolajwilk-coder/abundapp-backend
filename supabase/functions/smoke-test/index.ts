@@ -425,10 +425,14 @@ Deno.serve(async () => {
       const pBody = pRes.body as { holdings_breakdown?: (Holding & { value_ccy: number; value_usd: number; price_usd: number; amount: number; interest_rate?: number })[] };
       assert(Array.isArray(pBody.holdings_breakdown),
         `/portfolio nie zwrócił holdings_breakdown — status ${pRes.status}, body: ${JSON.stringify(pRes.body)}`);
-      const pos = pBody.holdings_breakdown!.find((x) => x.id === id);
+      const pos = pBody.holdings_breakdown!.find((x) => x.id === id) as
+        (Holding & { value_ccy: number; value_usd: number; price_usd: number; amount: number; interest_rate?: number; unit_value?: number; unit_currency?: string }) | undefined;
       assert(pos !== undefined, "/portfolio: brak utworzonej pozycji");
       assert(pos!.name === name, "/portfolio: zła nazwa pozycji");
       assert(pos!.interest_rate === RATE, `/portfolio: oczekiwano interest_rate=${RATE}, jest ${pos!.interest_rate}`);
+      // Natywna waluta/wartość pozycji — front czyta to do edytora (multi-currency manual).
+      assert(pos!.unit_currency === "PLN", `/portfolio: oczekiwano unit_currency=PLN, jest ${pos!.unit_currency}`);
+      assert(Number(pos!.unit_value) === 1, `/portfolio: oczekiwano unit_value=1 (bazowe, bez odsetek), jest ${pos!.unit_value}`);
       const expectedCcy = 100 * 1 * factor;
       assert(Math.abs(pos!.value_ccy - expectedCcy) < 0.05,
         `/portfolio: oczekiwano value_ccy≈${expectedCcy.toFixed(2)}, jest ${pos!.value_ccy}`);

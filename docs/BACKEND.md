@@ -213,7 +213,9 @@ Licznik nieudanych prób pobrania ceny, per asset, w obrębie doby UTC.
   "price_source": "market",
   "name": null,
   "display_category": null,
-  "interest_rate": null
+  "interest_rate": null,
+  "unit_value": null,
+  "unit_currency": null
 }
 ```
 - `value_usd` = `amount × price_usd` (niezmiennik trzyma się też dla manual — `price_usd` to wtedy efektywna cena jednostki w USD, z odsetkami dla obligacji)
@@ -222,6 +224,10 @@ Licznik nieudanych prób pobrania ceny, per asset, w obrębie doby UTC.
 - `id` = id wiersza `holdings` (do PATCH/DELETE)
 - `price_source` = `market` \| `manual`; `name` = nazwa custom assetu (manual) / null (market);
   `display_category` = nadpisanie kategorii lub null; `interest_rate` = stopa obligacji lub null
+- **`unit_value` + `unit_currency`** (tylko manual; null dla market) = natywna wycena pozycji:
+  cena jednostki i jej waluta — **dokładnie to, co user podał w `POST custom.unit_value`/`currency`**.
+  Front czyta to, by edytować `unit_value` we właściwej walucie. Dla obligacji `unit_value` jest
+  **bazowe** (bez naliczonych odsetek — to wartość do edycji); odsetki widać w `value_ccy`/`value_usd`.
 - **Wstecznie:** stare snapshoty (sprzed migracji) nie mają tych pól — frontend czyta je z domyślnymi (`price_source`→`market`, reszta null).
 
 ---

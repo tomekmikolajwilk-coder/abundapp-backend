@@ -91,6 +91,11 @@ export function buildBreakdown(
       name: row.price_source === "manual" ? row.name : null,
       display_category: row.display_category ?? null,
       interest_rate: interestRate,
+      // Natywna wycena pozycji manual — front czyta ją, by wiedzieć, w jakiej walucie
+      // pozwolić edytować unit_value. Zwracamy BAZOWY unit_value (bez naliczonych odsetek
+      // obligacji), bo to wartość, którą user wpisał i którą edytuje.
+      unit_value: row.price_source === "manual" ? row.unit_value : null,
+      unit_currency: row.price_source === "manual" ? row.currency : null,
     };
     if (selectedCurrencyPrice !== null) {
       entry.value_selected = valueUsd / selectedCurrencyPrice;
