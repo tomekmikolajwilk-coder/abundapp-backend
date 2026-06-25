@@ -471,8 +471,10 @@ Deno.serve(async () => {
 
   results.push(await run("transactions: genesis seed — każdy zalążkowy asset ma wpis buy", async () => {
     type Txn = { asset_id: string | null; side: string };
-    const txns = (await get("transactions")).body as { transactions: Txn[] };
-    const buys = new Set(txns.transactions.filter((t) => t.side === "buy").map((t) => t.asset_id));
+    const { status, body } = await get("transactions");
+    const arr = (body as { transactions?: Txn[] }).transactions;
+    assert(Array.isArray(arr), `/transactions bez tablicy transactions (status ${status}, body: ${JSON.stringify(body)})`);
+    const buys = new Set(arr.filter((t) => t.side === "buy").map((t) => t.asset_id));
     const seed = ["BTC", "ETH", "SOL", "AAPL", "MSFT", "GOOGL", "XAU", "EUR", "SPY", "QQQ"];
     const missing = seed.filter((a) => !buys.has(a));
     assert(missing.length === 0, `Brak genesis-buy dla: ${missing.join(", ")}`);
@@ -491,6 +493,23 @@ Deno.serve(async () => {
     assert(created.status === 201, `POST: oczekiwano 201, dostałem ${created.status} — ${JSON.stringify(created.body)}`);
     const id = (created.body as { id: string }).id;
 
+    // Odczyt weryfikujący jest ostatnim wywołaniem w całej suite — kumulatywny rate-limit
+    // funkcja→funkcja Supabase odrzuca najłatwiej właśnie ostatnie calle. Wyjątkowo jeden
+    // retry z dłuższą pauzą (okno limitu zdąży się odświeżyć), a gdy i to padnie — czytelny
+    // błąd ze statusem/body zamiast `undefined.filter`.
+    async function readMyTxns(): Promise<Txn[]> {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+        const { status, body } = await freshGet("transactions");
+        const arr = (body as { transactions?: Txn[] }).transactions;
+        if (Array.isArray(arr)) return arr.filter((t) => t.name === name);
+        if (attempt === 1) {
+          throw new Error(`/transactions bez tablicy transactions (status ${status}, body: ${JSON.stringify(body)})`);
+        }
+      }
+      return [];
+    }
+
     let deleted = false;
     try {
       const patched = await send("PATCH", `holdings/${id}`, { amount: 150 });
@@ -500,8 +519,7 @@ Deno.serve(async () => {
       assert(del.status === 200, `DELETE: oczekiwano 200, dostałem ${del.status}`);
       deleted = true;
 
-      const txns = ((await freshGet("transactions")).body as { transactions: Txn[] }).transactions
-        .filter((t) => t.name === name);
+      const txns = await readMyTxns();
       assert(txns.length === 3, `Oczekiwano 3 wpisów ledgera, jest ${txns.length}`);
 
       const buy100 = txns.find((t) => t.side === "buy" && t.amount === 100);
