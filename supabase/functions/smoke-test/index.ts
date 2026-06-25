@@ -402,10 +402,10 @@ Deno.serve(async () => {
     assert(status === 400, `Oczekiwano 400, dostałem ${status}`);
   }));
 
-  results.push(await run("holdings: cykl obligacji POST→/portfolio→PATCH→DELETE (liniowe odsetki)", async () => {
+  results.push(await run("holdings+ledger: cykl obligacji POST→PATCH→DELETE + wpisy transactions (buy/buy/sell)", async () => {
     const START = "2025-06-22";       // ~rok wstecz względem dzisiaj
     const RATE = 5;
-    const name = `${SMOKE_PREFIX} EDO`;
+    const name = `${SMOKE_PREFIX} EDO ${Date.now()}`;  // unikalna nazwa = izolacja wpisów ledgera tego przebiegu
 
     // POST manual bond
     const created = await send("POST", "holdings", {
@@ -452,6 +452,25 @@ Deno.serve(async () => {
       const del = await send("DELETE", `holdings/${id}`);
       assert(del.status === 200 || del.status === 404, `DELETE: oczekiwano 200/404, dostałem ${del.status} — body: ${JSON.stringify(del.body)}`);
     }
+
+    // ── Ledger: cykl wyżej wygenerował wpisy buy(100)→buy(100 delta)→sell(200) na tej
+    // manualnej pozycji (asset_id:null, name). Weryfikujemy je JEDNYM odczytem — bez
+    // osobnego cyklu POST/PATCH/DELETE, żeby nie przepalać per-trace rate-limitu funkcja→funkcja.
+    type Txn = { name: string | null; side: string; amount: number; value_usd: number; value_ccy: number };
+    const tRes = await freshGet("transactions");
+    const all = (tRes.body as { transactions?: Txn[] }).transactions;
+    assert(Array.isArray(all), `/transactions bez tablicy transactions — status ${tRes.status}, body: ${JSON.stringify(tRes.body)}`);
+    const mine = all!.filter((t) => t.name === name);
+    assert(mine.length === 3, `Ledger: oczekiwano 3 wpisów dla "${name}", jest ${mine.length}`);
+    const buys = mine.filter((t) => t.side === "buy");
+    const sells = mine.filter((t) => t.side === "sell");
+    assert(buys.length === 2 && sells.length === 1,
+      `Ledger: oczekiwano 2×buy + 1×sell, jest ${buys.length}×buy + ${sells.length}×sell`);
+    assert(buys.every((t) => t.amount === 100), `Ledger: każdy buy ma amount=100, jest [${buys.map((t) => t.amount)}]`);
+    assert(sells[0].amount === 200, `Ledger: sell ma amount=200, jest ${sells[0].amount}`);
+    // value_usd PODPISANA: + dla buy, − dla sell (definicja z feat ledgera); value_ccy ten sam znak.
+    assert(buys.every((t) => t.value_usd > 0 && t.value_ccy > 0), "Ledger: buy musi mieć value_usd/value_ccy > 0");
+    assert(sells[0].value_usd < 0 && sells[0].value_ccy < 0, "Ledger: sell musi mieć value_usd/value_ccy < 0");
   }));
 
   // ── /transactions (ledger przepływów) ───────────────────────────────────────
@@ -474,74 +493,10 @@ Deno.serve(async () => {
     const { status, body } = await get("transactions");
     const arr = (body as { transactions?: Txn[] }).transactions;
     assert(Array.isArray(arr), `/transactions bez tablicy transactions (status ${status}, body: ${JSON.stringify(body)})`);
-    const buys = new Set(arr.filter((t) => t.side === "buy").map((t) => t.asset_id));
+    const buys = new Set(arr!.filter((t) => t.side === "buy").map((t) => t.asset_id));
     const seed = ["BTC", "ETH", "SOL", "AAPL", "MSFT", "GOOGL", "XAU", "EUR", "SPY", "QQQ"];
     const missing = seed.filter((a) => !buys.has(a));
     assert(missing.length === 0, `Brak genesis-buy dla: ${missing.join(", ")}`);
-  }));
-
-  results.push(await run("transactions: cykl ledgera POST(buy)→PATCH(buy delta)→DELETE(sell)", async () => {
-    type Txn = { name: string | null; side: string; amount: number; value_usd: number; value_ccy: number };
-    const name = `${SMOKE_PREFIX} TX ${Date.now()}`;          // unikalna nazwa = filtr na ten przebieg
-
-    // Mutacje: POST (buy 100) → PATCH amount=150 (buy delta 50) → DELETE (sell 150).
-    // Weryfikacja JEDNYM odczytem na końcu — minimalizujemy wywołania funkcja→funkcja
-    // (Supabase rate-limituje je per-przebieg; nadmiar = odrzucony fetch / status 0).
-    const created = await send("POST", "holdings", {
-      category: "other", amount: 100, custom: { name, unit_value: 1, currency: "PLN" },
-    });
-    assert(created.status === 201, `POST: oczekiwano 201, dostałem ${created.status} — ${JSON.stringify(created.body)}`);
-    const id = (created.body as { id: string }).id;
-
-    // Odczyt weryfikujący jest ostatnim wywołaniem w całej suite — kumulatywny rate-limit
-    // funkcja→funkcja Supabase odrzuca najłatwiej właśnie ostatnie calle. Wyjątkowo jeden
-    // retry z dłuższą pauzą (okno limitu zdąży się odświeżyć), a gdy i to padnie — czytelny
-    // błąd ze statusem/body zamiast `undefined.filter`.
-    async function readMyTxns(): Promise<Txn[]> {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
-        const { status, body } = await freshGet("transactions");
-        const arr = (body as { transactions?: Txn[] }).transactions;
-        if (Array.isArray(arr)) return arr.filter((t) => t.name === name);
-        if (attempt === 1) {
-          throw new Error(`/transactions bez tablicy transactions (status ${status}, body: ${JSON.stringify(body)})`);
-        }
-      }
-      return [];
-    }
-
-    let deleted = false;
-    try {
-      const patched = await send("PATCH", `holdings/${id}`, { amount: 150 });
-      assert(patched.status === 200, `PATCH: oczekiwano 200, dostałem ${patched.status}`);
-
-      const del = await send("DELETE", `holdings/${id}`);
-      assert(del.status === 200, `DELETE: oczekiwano 200, dostałem ${del.status}`);
-      deleted = true;
-
-      const txns = await readMyTxns();
-      assert(txns.length === 3, `Oczekiwano 3 wpisów ledgera, jest ${txns.length}`);
-
-      const buy100 = txns.find((t) => t.side === "buy" && t.amount === 100);
-      const buy50 = txns.find((t) => t.side === "buy" && t.amount === 50);   // PATCH delta
-      const sell150 = txns.find((t) => t.side === "sell" && t.amount === 150);
-      assert(buy100 !== undefined, "brak wpisu buy amount=100 (POST)");
-      assert(buy50 !== undefined, "brak wpisu buy amount=50 (PATCH delta)");
-      assert(sell150 !== undefined, "brak wpisu sell amount=150 (DELETE)");
-
-      // Znaki + wycena: buy dodatni, sell ujemny; value_ccy≈100 PLN dla buy100 (unit_value 1 × 100).
-      assert(buy100!.value_usd > 0 && Math.abs(buy100!.value_ccy - 100) < 0.5,
-        `buy100: oczekiwano value_usd>0 i value_ccy≈100, jest ${buy100!.value_usd}/${buy100!.value_ccy}`);
-      assert(sell150!.value_usd < 0 && sell150!.value_ccy < 0, "sell150: value_usd/value_ccy muszą być ujemne");
-
-      // Suma podpisanych przepływów = 0 (kup 100 + kup 50 − sprzedaj 150).
-      const net = txns.reduce((s, t) => s + t.value_ccy, 0);
-      assert(Math.abs(net) < 0.5, `Przepływ netto powinien wynosić ~0, jest ${net}`);
-    } finally {
-      // Best-effort: tylko gdy DELETE-krok nie wykonał się (asercja padła wcześniej).
-      // Nie asserujemy — odrzucony fetch z rate-limitu nie może wywalić zielonego testu.
-      if (!deleted) await send("DELETE", `holdings/${id}`);
-    }
   }));
 
   // ── Podsumowanie ──────────────────────────────────────────────────────────
