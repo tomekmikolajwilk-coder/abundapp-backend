@@ -454,6 +454,78 @@ Deno.serve(async () => {
     }
   }));
 
+  // ── /transactions (ledger przepływów) ───────────────────────────────────────
+
+  results.push(await run("transactions: brak tokena → 401 (bramka verify_jwt)", async () => {
+    const status = await statusNoAuth("transactions");
+    assert(status === 401, `Oczekiwano 401, dostałem ${status}`);
+  }));
+
+  results.push(await run("transactions: zwraca 200, currency=PLN i tablicę transactions", async () => {
+    const { status, body } = await get("transactions");
+    assert(status === 200, `Oczekiwano 200, dostałem ${status} — body: ${JSON.stringify(body)}`);
+    const b = body as { currency: string; transactions: unknown[] };
+    assert(b.currency === "PLN", `Oczekiwano currency=PLN, jest ${b.currency}`);
+    assert(Array.isArray(b.transactions), "transactions nie jest tablicą");
+  }));
+
+  results.push(await run("transactions: genesis seed — każdy zalążkowy asset ma wpis buy", async () => {
+    type Txn = { asset_id: string | null; side: string };
+    const txns = (await get("transactions")).body as { transactions: Txn[] };
+    const buys = new Set(txns.transactions.filter((t) => t.side === "buy").map((t) => t.asset_id));
+    const seed = ["BTC", "ETH", "SOL", "AAPL", "MSFT", "GOOGL", "XAU", "EUR", "SPY", "QQQ"];
+    const missing = seed.filter((a) => !buys.has(a));
+    assert(missing.length === 0, `Brak genesis-buy dla: ${missing.join(", ")}`);
+  }));
+
+  results.push(await run("transactions: cykl ledgera POST(buy)→PATCH(buy delta)→DELETE(sell)", async () => {
+    type Txn = { name: string | null; side: string; amount: number; value_usd: number; value_ccy: number };
+    const name = `${SMOKE_PREFIX} TX ${Date.now()}`;          // unikalna nazwa = filtr na ten przebieg
+    const mine = (body: unknown): Txn[] =>
+      ((body as { transactions: Txn[] }).transactions ?? []).filter((t) => t.name === name);
+
+    // POST manual → 1 wpis buy, amount=100, value_ccy≈100 PLN (unit_value 1 PLN × 100).
+    const created = await send("POST", "holdings", {
+      category: "other", amount: 100, custom: { name, unit_value: 1, currency: "PLN" },
+    });
+    assert(created.status === 201, `POST: oczekiwano 201, dostałem ${created.status} — ${JSON.stringify(created.body)}`);
+    const id = (created.body as { id: string }).id;
+
+    try {
+      let txns = mine((await freshGet("transactions")).body);
+      assert(txns.length === 1, `Po POST oczekiwano 1 wpisu, jest ${txns.length}`);
+      assert(txns[0].side === "buy", `Po POST oczekiwano side=buy, jest ${txns[0].side}`);
+      assert(txns[0].amount === 100, `Po POST oczekiwano amount=100, jest ${txns[0].amount}`);
+      assert(txns[0].value_usd > 0, "buy: value_usd musi być dodatnie");
+      assert(Math.abs(txns[0].value_ccy - 100) < 0.5, `buy: oczekiwano value_ccy≈100 PLN, jest ${txns[0].value_ccy}`);
+
+      // PATCH amount=150 → delta +50 = drugi wpis buy (rewaluacja unit_value to NIE transakcja).
+      const patched = await send("PATCH", `holdings/${id}`, { amount: 150 });
+      assert(patched.status === 200, `PATCH: oczekiwano 200, dostałem ${patched.status}`);
+      txns = mine((await freshGet("transactions")).body);
+      assert(txns.length === 2, `Po PATCH oczekiwano 2 wpisów, jest ${txns.length}`);
+      const delta = txns.find((t) => t.amount === 50);
+      assert(delta !== undefined && delta.side === "buy", "Po PATCH brak wpisu buy delta=50");
+
+      // DELETE → sell całości (150), value_usd/value_ccy UJEMNE.
+      const del = await send("DELETE", `holdings/${id}`);
+      assert(del.status === 200, `DELETE: oczekiwano 200, dostałem ${del.status}`);
+      txns = mine((await freshGet("transactions")).body);
+      assert(txns.length === 3, `Po DELETE oczekiwano 3 wpisów, jest ${txns.length}`);
+      const sell = txns.find((t) => t.side === "sell");
+      assert(sell !== undefined, "Po DELETE brak wpisu sell");
+      assert(sell!.amount === 150, `sell: oczekiwano amount=150, jest ${sell!.amount}`);
+      assert(sell!.value_usd < 0 && sell!.value_ccy < 0, "sell: value_usd/value_ccy muszą być ujemne");
+
+      // Suma podpisanych przepływów = 0 (kup 100 + kup 50 − sprzedaj 150).
+      const net = txns.reduce((s, t) => s + t.value_ccy, 0);
+      assert(Math.abs(net) < 0.5, `Przepływ netto powinien wynosić ~0, jest ${net}`);
+    } finally {
+      const del = await send("DELETE", `holdings/${id}`);
+      assert(del.status === 200 || del.status === 404, `cleanup DELETE: oczekiwano 200/404, dostałem ${del.status}`);
+    }
+  }));
+
   // ── Podsumowanie ──────────────────────────────────────────────────────────
 
   const passed = results.filter(r => r.passed).length;

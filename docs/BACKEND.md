@@ -119,6 +119,31 @@ Dwie klasy wg `price_source`:
 - **Obligacje (`bonds`)** — wartość naliczana **liniowo, on-read**: `value = principal × (1 + interest_rate/100 × dni_od_start_date/365)`, `principal = amount × unit_value`. Liczone od zera z liczby dni → idempotentne (pominięty/podwójny cron bez znaczenia, **nic nie inkrementujemy**).
 - RLS: user CRUD-uje tylko własne wiersze (`auth.uid() = user_id`); service_role pełny dostęp.
 
+### `transactions`
+Ledger przepływów per-user — historia transakcji **oraz** baza do rozbicia PnL na „transakcje
+vs ruch ceny". Świadomie **bez** cost-basis / realized / unrealized — tylko surowe przepływy.
+Wpis powstaje przy mutacji `holdings`; backend jest jedynym autorem (user ma tylko odczyt).
+
+| Kolumna | Typ | Opis |
+|---------|-----|------|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `user_id` | uuid | FK → `auth.users(id)`, cascade |
+| `holding_id` | uuid | FK → `holdings(id)` **ON DELETE SET NULL** (historia przeżywa usunięcie pozycji) |
+| `asset_id` | text | market: symbol; null dla manual |
+| `name` | text | manual: nazwa custom assetu; null dla market |
+| `category` | text | |
+| `side` | text | `buy` \| `sell` (CHECK) |
+| `amount` | numeric | ilość, zawsze `> 0` (CHECK) |
+| `exec_price_usd` | numeric | cena 1 jednostki w USD w momencie tx (`>= 0`) |
+| `value_usd` | numeric | **PODPISANA**: `+` buy, `−` sell (`= ±amount × exec_price_usd`) |
+| `created_at` | timestamptz | |
+
+- **Kiedy zapis:** `POST /holdings` → buy całości; `PATCH amount` → delta (dodatnia=buy, ujemna=sell) po bieżącej cenie; `DELETE` → sell całości. **`PATCH unit_value` (rewaluacja manual) NIE zapisuje** — to ruch ceny, nie przepływ.
+- **Cena wykonania:** market = kurs z `price_cache`; manual = `unit_value × fx` (USD=1). Brak kursu → wpis pomijany (best-effort, nie wywraca mutacji holdings).
+- **Edge case'y** (kup→sprzedaj→dokup) wychodzą same z sumy podpisanych `value_usd` — nie ma osobnej logiki.
+- **Genesis seed** (migracja): istniejące holdingi → po jednym `buy` (bieżąca ilość × bieżąca cena, `created_at` = data utworzenia pozycji).
+- RLS: user **tylko odczyt** własnych wierszy; service_role pełny dostęp.
+
 ### `asset_definitions`
 Katalog wszystkich obsługiwanych aktywów — **źródło prawdy** dla `category`,
 `display_name` i sposobu wyceny.
@@ -372,6 +397,22 @@ Edycja istniejącej pozycji usera. Body: `{ "amount"?: number, "unit_value"?: nu
 
 ### `DELETE /holdings/:id`
 Usuwa pozycję usera. Zwraca `{ "deleted": true, "id": "…" }`. `404` gdy nie znaleziono.
+W tle zapisuje do ledgera `sell` całości po bieżącej cenie.
+
+### `GET /transactions`
+Historia przepływów usera (`JWT`, `user_id` z claim `sub`). Lista **malejąco po `created_at`**.
+- `?currency=EUR` — przeliczenie na EUR; bez parametru używa `preferred_currency` usera.
+- `value_usd` PODPISANA (`+` buy, `−` sell); `value_ccy = value_usd / fx` (fx = ile USD kosztuje 1 jednostka waluty, USD=1) — zachowuje znak, do sumowania przepływów w walucie frontu.
+- Front liczy rozbicie sam: **`Ruch ceny = ΔWartość − Σ value_ccy`** (ΔWartość już ma z `/portfolio`).
+```json
+{ "currency": "PLN",
+  "transactions": [
+    { "id": "…", "asset_id": "BTC", "name": null, "category": "crypto",
+      "side": "buy", "amount": 0.25, "exec_price_usd": 66928,
+      "value_usd": 16732, "value_ccy": 61125.93, "created_at": "2026-06-24T18:00:00Z" }
+  ] }
+```
+- Manual: `asset_id` = null, `name` ustawione. `400` przy nieznanej walucie.
 
 ---
 

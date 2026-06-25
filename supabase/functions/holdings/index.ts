@@ -1,6 +1,7 @@
 import { getServiceClient, type Supa } from "../_shared/supabase.ts";
 import { badRequest, json, notFound, serverError } from "../_shared/http.ts";
 import { resolveUserId } from "../_shared/auth.ts";
+import { execPriceUsd, recordTransaction } from "../_shared/transactions.ts";
 
 // Dodawanie / edycja / usuwanie pozycji portfela. user_id z JWT (claim `sub`).
 //
@@ -85,6 +86,17 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
       display_category: typeof display_category === "string" ? display_category : null,
     }).select().single();
     if (insErr) return serverError(insErr.message);
+
+    // Ledger: buy całości po bieżącym kursie market. Brak kursu (uszkodzony asset) → pomijamy.
+    const price = await execPriceUsd(supabase, { price_source: "market", asset_id, unit_value: null, currency: null });
+    if (price != null) {
+      await recordTransaction(supabase, {
+        userId, holdingId: data.id, assetId: asset_id, name: null,
+        category: def.category, side: "buy", amount, execPriceUsd: price,
+      });
+    } else {
+      console.warn(`[holdings] brak kursu dla ${asset_id} — pomijam wpis do ledgera`);
+    }
     return json(data, 201);
   }
 
@@ -139,6 +151,20 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
       start_date: startDate,
     }).select().single();
     if (insErr) return serverError(insErr.message);
+
+    // Ledger: buy całości po cenie unit_value→USD. Brak kursu waluty → pomijamy.
+    const price = await execPriceUsd(
+      supabase,
+      { price_source: "manual", asset_id: null, unit_value, currency },
+    );
+    if (price != null) {
+      await recordTransaction(supabase, {
+        userId, holdingId: data.id, assetId: null, name: name.trim(),
+        category, side: "buy", amount, execPriceUsd: price,
+      });
+    } else {
+      console.warn(`[holdings] brak kursu waluty ${currency} — pomijam wpis do ledgera`);
+    }
     return json(data, 201);
   }
 
@@ -163,8 +189,9 @@ async function patchHolding(supabase: Supa, userId: string, id: string, req: Req
   if (Object.keys(update).length === 0) return badRequest("Brak pól do zmiany (amount/unit_value)");
 
   // Najpierw potwierdzamy własność i klasę pozycji — czysty 404/400 zamiast błędu constraintu.
+  // Zaciągamy też pola do ledgera (stary amount na deltę + dane do wpisu).
   const { data: existing, error: findErr } = await supabase
-    .from("holdings").select("price_source")
+    .from("holdings").select("price_source, category, amount, asset_id, name, unit_value, currency")
     .eq("id", id).eq("user_id", userId).single();
   if (findErr || !existing) return notFound(`Holding ${id} nie znaleziony`);
   if (update.unit_value !== undefined && existing.price_source !== "manual") {
@@ -178,14 +205,53 @@ async function patchHolding(supabase: Supa, userId: string, id: string, req: Req
     .eq("id", id).eq("user_id", userId)
     .select().single();
   if (error || !data) return serverError(error?.message ?? "Update failed");
+
+  // Ledger: zmiana amount = przepływ (delta>0 buy, <0 sell) po bieżącej cenie.
+  // Rewaluacja unit_value sama w sobie to NIE transakcja (to ruch ceny). Jeśli PATCH
+  // zmienia oba naraz, delta ilości wykonuje się po cenie po rewaluacji (nowy unit_value).
+  if (update.amount !== undefined) {
+    const delta = (update.amount as number) - existing.amount;
+    if (delta !== 0) {
+      const effUnit = update.unit_value !== undefined
+        ? (update.unit_value as number)
+        : existing.unit_value;
+      const price = await execPriceUsd(
+        supabase,
+        { price_source: existing.price_source, asset_id: existing.asset_id, unit_value: effUnit, currency: existing.currency },
+      );
+      if (price != null) {
+        await recordTransaction(supabase, {
+          userId, holdingId: id, assetId: existing.asset_id, name: existing.name,
+          category: existing.category, side: delta > 0 ? "buy" : "sell",
+          amount: Math.abs(delta), execPriceUsd: price,
+        });
+      }
+    }
+  }
+
   return json(data);
 }
 
 async function deleteHolding(supabase: Supa, userId: string, id: string): Promise<Response> {
-  const { data, error } = await supabase
+  // Pobieramy wiersz PRZED kasowaniem — potrzebny do ledgera (sell całości) i do 404.
+  const { data: row, error: findErr } = await supabase
+    .from("holdings").select("price_source, category, amount, asset_id, name, unit_value, currency")
+    .eq("id", id).eq("user_id", userId).single();
+  if (findErr || !row) return notFound(`Holding ${id} nie znaleziony`);
+
+  // Ledger: sell całej ilości po bieżącej cenie. holding_id wyzeruje się przy delete
+  // (FK ON DELETE SET NULL) — wpis zostaje w historii z asset_id/name/category.
+  const price = await execPriceUsd(supabase, row);
+  if (price != null) {
+    await recordTransaction(supabase, {
+      userId, holdingId: id, assetId: row.asset_id, name: row.name,
+      category: row.category, side: "sell", amount: row.amount, execPriceUsd: price,
+    });
+  }
+
+  const { error } = await supabase
     .from("holdings").delete()
-    .eq("id", id).eq("user_id", userId)
-    .select().single();
-  if (error || !data) return notFound(`Holding ${id} nie znaleziony`);
+    .eq("id", id).eq("user_id", userId);
+  if (error) return serverError(error.message);
   return json({ deleted: true, id });
 }
