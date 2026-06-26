@@ -152,12 +152,27 @@ Katalog wszystkich obsługiwanych aktywów — **źródło prawdy** dla `categor
 |---------|-----|------|
 | `asset_id` | text PK | czysty ticker, np. `BTC`, `SPY`, `XAU` |
 | `category` | text | `crypto` \| `stock` \| `metal` \| `currency` \| `etf` (CHECK) |
-| `api_source` | text | `twelve_data` \| `metals_dev` (CHECK) |
-| `api_symbol` | text | symbol w formacie danego API (np. `BTC/USD`, `gold`, `VWCE:XETRA`) |
+| `api_source` | text | **FK → `price_sources(source)`** (`twelve_data`/`metals_dev`/`coingecko`) |
+| `api_symbol` | text | symbol w formacie danego API (np. `bitcoin`, `gold`, `VWCE:XETRA`) |
 | `display_name` | text | nazwa dla usera (np. `Bitcoin`) |
+| `exchange` | text | giełda (`NASDAQ`/`XETRA`/…); filtr w `/assets/search`; null dla krypto/metali/FX |
+| `country` | text | ISO kraju (`US`/`DE`/…); null gdzie nie dotyczy |
 | `active` | boolean | `false` = ukryty bez usuwania (wypada z fetchy i pickerów) |
 
 - RLS: publiczny odczyt (frontend potrzebuje do pickera), zapis tylko service_role.
+- **Niezmiennik:** katalog ⊆ wyceniarne — każdy wiersz ma `(api_source, api_symbol)`, które
+  jakiś provider potrafi pobrać. Stock/ETF seedowane z listy Twelve Data (= jej pokrycie cen).
+- Trigramowe indeksy (pg_trgm) na `display_name`/`asset_id` pod `/assets/search`.
+
+### `price_sources`
+Słownik źródeł cen — FK z `asset_definitions.api_source`. Dodanie źródła = insert wiersza
+(zamiast edycji CHECK przy każdym providerze).
+
+| Kolumna | Typ | Opis |
+|---------|-----|------|
+| `source` | text PK | = `asset_definitions.api_source` / `provider.source` |
+| `display_name` | text | nazwa źródła (np. `Twelve Data`) |
+| `kind` | text | `rotation` (provider w fetch-prices) \| `standalone` (własna funkcja) — CHECK |
 
 ### `price_cache`
 Ostatni znany kurs każdego aktywa (w USD).
@@ -262,7 +277,7 @@ Licznik nieudanych prób pobrania ceny, per asset, w obrębie doby UTC.
 Aktywo opisują **dwie niezależne osie** — nie sklejać ich:
 
 - **`category`** = CO to jest (`crypto`, `stock`, `metal`, `currency`, `etf`)
-- **`api_source`** = JAK wyceniamy (`twelve_data`, `metals_dev`, w przyszłości `null` = user podaje ręcznie)
+- **`api_source`** = JAK wyceniamy — FK do `price_sources` (`twelve_data`, `metals_dev`, `coingecko`; przyszłe EU = insert wiersza)
 
 Przykład: REIT = `category 'real_estate'` + `api_source 'twelve_data'`; fizyczne mieszkanie =
 `category 'real_estate'` + `api_source null`. Ta sama klasa aktywa, inny sposób wyceny.
@@ -275,7 +290,7 @@ niosą własną nazwę i cenę w wierszu `holdings`.
 ### Aktualny katalog (`asset_definitions`)
 | Kategoria | Aktywne | Uwagi |
 |-----------|---------|-------|
-| crypto | BTC, ETH, SOL | Twelve Data |
+| crypto | BTC, ETH, SOL | **CoinGecko** (`fetch-crypto`, api_symbol = coingecko id) |
 | stock | AAPL, MSFT, GOOGL, AMZN, TSLA, NVDA | Twelve Data |
 | currency | EUR, GBP, JPY, CHF, CAD, PLN | Twelve Data (kurs `X/USD`) |
 | metal | XAU, XAG, XPT, XPD | Metals.Dev |
@@ -314,6 +329,23 @@ Wszystkie aktywne aktywa z aktualnym kursem, pogrupowane po kategorii.
   "currency": [{ "asset_id": "PLN",  "display_name": "...",     "price_usd": 0.2737, "category": "currency", "updated_at": "..." }]
 }
 ```
+Hurtem ma sens dla małych zbiorów (krypto, waluty, metale). Dla tysięcy stock/ETF picker
+używa `/assets/search` — `/assets` ich nie zwraca w całości (zwraca tylko to, co ma kurs w cache).
+
+### `GET /assets/search`
+Paginowany search po katalogu (picker search-as-you-type, Faza 3). Routuje do tej samej
+funkcji co `/assets`.
+- Parametry: `q` (podłańcuch nazwy/tickera, ≥2 znaki), `category`, `exchange`, `limit` (≤50, dom. 20), `offset`.
+- Wymaga **`q` lub `category`** (inaczej 400 — bez tego zwracałby cały katalog).
+- `q` → trigramowy ILIKE po `display_name` i `asset_id` (indeksy pg_trgm).
+```json
+{
+  "results": [{ "asset_id": "AAPL", "category": "stock", "display_name": "Apple Inc", "exchange": "NASDAQ", "country": "US" }],
+  "limit": 20, "offset": 0, "has_more": false
+}
+```
+- `has_more` liczone trickiem limit+1 (bez `COUNT(*)` po całym katalogu).
+- Zwraca **metadane** (bez kursu) — held assety z kursem idą przez `/portfolio`.
 
 ### `GET /portfolio`
 Live portfolio — liczone na bieżąco z `holdings × price_cache`.
