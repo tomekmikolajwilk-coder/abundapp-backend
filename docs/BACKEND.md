@@ -421,14 +421,24 @@ Historia przepływów usera (`JWT`, `user_id` z claim `sub`). Lista **malejąco 
 Te funkcje odpala pg_cron (nie frontend). Każda loguje do `cron_logs` i wysyła mail przy awarii.
 
 ### `fetch-prices` (co 15 min)
-Rotujący kursor Twelve Data. Bierze **8 najstarszych** aktywów `twelve_data`
-(`updated_at ASC NULLS FIRST` — nowe tickery idą pierwsze), robi **jedno** żądanie
-na ≤8 symboli (bez batchowania/sleepów — to usunęło `WORKER_RESOURCE_LIMIT`).
-- Sukces → zapis do `price_cache`, kasuje ewentualny wpis w `damaged_assets`.
+Silnik rotacji cen — **demand-driven + multi-provider** (patrz `docs/PRICING_REDESIGN.md` Faza 2).
+- **Kandydaci = aktywa faktycznie trzymane** (`DISTINCT holdings.asset_id` gdzie `price_source='market'`)
+  **∪ wszystkie aktywne waluty** (FX-szkielet konwersji `preferred_currency`/`?currency=` — bierzemy
+  niezależnie od holdings). Katalog może mieć tysiące pozycji, rotacja ich nie tyka.
+- Kandydaci **grupowani per `api_source`**; każda grupa ma własny provider
+  (`_shared/price_providers/`) z własnym `batchSize` i kursorem. Dziś zarejestrowany tylko
+  `twelve_data` (`batchSize=8`). Źródła z własną funkcją (`coingecko`, `metals_dev`) nie mają
+  providera tutaj → trzymane aktywa z tych źródeł rotacja pomija.
+- Kursor per grupa: **najstarsze `updated_at` pierwsze** (NULL = nowy ticker = priorytet),
+  jedno żądanie na ≤`batchSize` symboli.
+- Sukces → zapis do `price_cache`, kasuje wpis w `damaged_assets`.
 - Porażka → inkrement licznika w `damaged_assets`. Po 3 próbach/dobę: log error + mail,
   asset wypada z rotacji do północy UTC.
-- Czysta logika (`logic.ts`) testowana jednostkowo — bramka `unit-test` w CI.
+- Czysta logika (`logic.ts`: `pickAssets`/`applyOutcomes`) testowana jednostkowo, wołana per
+  grupa — bramka `unit-test` w CI. Sam request siedzi w providerze.
 - Bezpiecznik budżetu: 8 × 96 wywołań/dobę = 768 < 800 (limit Twelve Data).
+- **On-demand (Faza 2b):** `holdings` POST market przy braku ceny w cache woła
+  `provider.fetchBatch([asset])` od razu (best-effort) — user widzi cenę natychmiast.
 
 ### `fetch-metals` (co 2 dni, 6:00 UTC)
 Metale z Metals.Dev. Osobno, bo limit 100 req/**miesiąc**.
@@ -483,6 +493,7 @@ tego jako osobnej funkcji; importy `../_shared/*.ts` są bundlowane do każdej f
 | `alerts.ts` | `sendAlertEmail()`, `writeCronLog()` |
 | `currency.ts` | `resolveSelectedCurrency()` — walidacja `?currency=X` + kurs FX |
 | `pricing.ts` | `buildPriceMap()` — mapa `asset_id → { price_usd, category }` |
+| `price_providers/` | warstwa per-źródło rotacji: `PriceProvider` (interfejs), `twelveDataProvider`, rejestr `getProvider()` |
 
 ---
 

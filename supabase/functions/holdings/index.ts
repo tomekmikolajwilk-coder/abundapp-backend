@@ -2,6 +2,7 @@ import { getServiceClient, type Supa } from "../_shared/supabase.ts";
 import { badRequest, json, notFound, serverError } from "../_shared/http.ts";
 import { resolveUserId } from "../_shared/auth.ts";
 import { execPriceUsd, recordTransaction } from "../_shared/transactions.ts";
+import { getProvider } from "../_shared/price_providers/index.ts";
 
 // Dodawanie / edycja / usuwanie pozycji portfela. user_id z JWT (claim `sub`).
 //
@@ -57,6 +58,30 @@ async function parseBody(req: Request): Promise<Record<string, unknown> | null> 
   }
 }
 
+// On-demand pobranie ceny przy dodaniu pozycji, gdy nie ma jej jeszcze w price_cache.
+// Best-effort: tylko dla źródeł z providerem rotacji (twelve_data). Źródła z własnym cronem
+// (coingecko → fetch-crypto co 5 min) nie mają providera tutaj — cena dosypie się sama wkrótce.
+// Porażka nie blokuje utworzenia pozycji (jak reszta przepływu ledgera).
+async function fetchPriceOnDemand(
+  supabase: Supa,
+  assetId: string,
+  apiSource: string,
+  apiSymbol: string,
+): Promise<number | null> {
+  const provider = getProvider(apiSource);
+  if (!provider) return null;
+  try {
+    const { rows } = await provider.fetchBatch([{ asset_id: assetId, api_symbol: apiSymbol }]);
+    if (rows.length === 0) return null;
+    await supabase.from("price_cache").upsert(rows, { onConflict: "asset_id" });
+    console.log(`[holdings] on-demand: pobrano kurs ${assetId} = ${rows[0].price_usd}`);
+    return rows[0].price_usd;
+  } catch (err) {
+    console.warn(`[holdings] on-demand fetch ${assetId} nieudany: ${String(err)}`);
+    return null;
+  }
+}
+
 async function createHolding(supabase: Supa, userId: string, req: Request): Promise<Response> {
   const body = await parseBody(req);
   if (!body) return badRequest("Nieprawidłowy JSON");
@@ -70,7 +95,7 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
     if (typeof asset_id !== "string") return badRequest("market: wymagany asset_id");
 
     const { data: def, error } = await supabase
-      .from("asset_definitions").select("category")
+      .from("asset_definitions").select("category, api_source, api_symbol")
       .eq("asset_id", asset_id).eq("active", true).single();
     if (error || !def) return badRequest(`Nieznany lub nieaktywny asset ${asset_id}`);
     if (def.category !== category) {
@@ -87,8 +112,12 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
     }).select().single();
     if (insErr) return serverError(insErr.message);
 
-    // Ledger: buy całości po bieżącym kursie market. Brak kursu (uszkodzony asset) → pomijamy.
-    const price = await execPriceUsd(supabase, { price_source: "market", asset_id, unit_value: null, currency: null });
+    // Ledger: buy całości po bieżącym kursie market. Brak kursu w cache → próbujemy pobrać
+    // on-demand od razu (user widzi cenę natychmiast); potem asset jest trzymany → wchodzi do rotacji.
+    let price = await execPriceUsd(supabase, { price_source: "market", asset_id, unit_value: null, currency: null });
+    if (price == null) {
+      price = await fetchPriceOnDemand(supabase, asset_id, def.api_source as string, def.api_symbol as string);
+    }
     if (price != null) {
       await recordTransaction(supabase, {
         userId, holdingId: data.id, assetId: asset_id, name: null,
