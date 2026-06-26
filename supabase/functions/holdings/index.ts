@@ -82,6 +82,23 @@ async function fetchPriceOnDemand(
   }
 }
 
+// Add-time guard ceny dla pozycji market. Zwraca wycenę (jeśli znana) i czy DODANIE blokujemy.
+//   - cache ma kurs            → { price, blocked:false }
+//   - brak + provider rotacji  → on-demand; sukces → cena, porażka → blocked (genuine brak notowań)
+//   - brak + brak providera    → { price:null, blocked:false } (crypto/metal: własny cron dosypie cenę)
+async function resolveMarketPrice(
+  supabase: Supa,
+  assetId: string,
+  apiSource: string,
+  apiSymbol: string,
+): Promise<{ price: number | null; blocked: boolean }> {
+  const cached = await execPriceUsd(supabase, { price_source: "market", asset_id: assetId, unit_value: null, currency: null });
+  if (cached != null) return { price: cached, blocked: false };
+  if (!getProvider(apiSource)) return { price: null, blocked: false };
+  const fetched = await fetchPriceOnDemand(supabase, assetId, apiSource, apiSymbol);
+  return fetched != null ? { price: fetched, blocked: false } : { price: null, blocked: true };
+}
+
 async function createHolding(supabase: Supa, userId: string, req: Request): Promise<Response> {
   const body = await parseBody(req);
   if (!body) return badRequest("Nieprawidłowy JSON");
@@ -102,6 +119,13 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
       return badRequest(`asset ${asset_id} ma kategorię ${def.category}, nie ${category}`);
     }
 
+    // Add-time guard: wyceniamy PRZED insertem — pozycja bez kursu nie wchodzi do portfela.
+    // Brak ceny ze źródła rotacji (np. twelve_data nie ma notowań) → blokada, nic nie tworzymy.
+    const { price, blocked } = await resolveMarketPrice(supabase, asset_id, def.api_source as string, def.api_symbol as string);
+    if (blocked) {
+      return badRequest(`Brak notowań dla ${asset_id} — nie można dodać pozycji (źródło ceny nie zwraca kursu).`);
+    }
+
     const { data, error: insErr } = await supabase.from("holdings").insert({
       user_id: userId,
       price_source: "market",
@@ -112,12 +136,8 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
     }).select().single();
     if (insErr) return serverError(insErr.message);
 
-    // Ledger: buy całości po bieżącym kursie market. Brak kursu w cache → próbujemy pobrać
-    // on-demand od razu (user widzi cenę natychmiast); potem asset jest trzymany → wchodzi do rotacji.
-    let price = await execPriceUsd(supabase, { price_source: "market", asset_id, unit_value: null, currency: null });
-    if (price == null) {
-      price = await fetchPriceOnDemand(supabase, asset_id, def.api_source as string, def.api_symbol as string);
-    }
+    // Ledger: buy całości po wycenie sprzed insertu. price bywa null tylko dla źródeł bez providera
+    // (crypto/metal chwilowo bez cache) — wtedy pomijamy wpis, dosypie się z własnego cronu.
     if (price != null) {
       await recordTransaction(supabase, {
         userId, holdingId: data.id, assetId: asset_id, name: null,

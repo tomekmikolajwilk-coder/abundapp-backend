@@ -410,6 +410,9 @@ Dodaje pozycję do portfela. `user_id` z JWT. Zwraca `201` z utworzonym wierszem
 ```
 - `category` ∈ market (`crypto`/`stock`/`etf`/`metal`/`currency`), `asset_id` musi istnieć i być aktywny w `asset_definitions`, a jego kategoria musi zgadzać się z `category`.
 - `display_category` opcjonalne (np. ETF obligacyjny → `bonds`).
+- **Add-time guard:** backend wycenia asset **przed** insertem (cache → on-demand z providera).
+  Gdy źródło rotacji nie zwraca kursu → **`400` „brak notowań", pozycja NIE powstaje** (niezmiennik
+  „katalog ⊆ wyceniarne"). Krypto/metale (własny cron) nie są blokowane — cache dosypie cenę.
 
 **manual** (cenę podaje user):
 ```json

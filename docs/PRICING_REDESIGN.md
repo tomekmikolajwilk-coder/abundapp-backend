@@ -93,6 +93,34 @@ Plik dziś: `supabase/functions/fetch-prices/{index.ts,logic.ts,logic_test.ts}`.
   źródło) zamiast edycji CHECK przy każdym dostawcy. Migracja: utworzyć `price_sources`, przepiąć FK.
 - **To jedyna faza dotykająca frontendu** (picker = search-as-you-type). Osobny projekt z frontendem.
 
+#### Katalog — jak go napełniamy i ROZSZERZAMY (zaimplementowane)
+Zasada nadrzędna: **katalog ⊆ wyceniarne** — w `asset_definitions` ląduje tylko to, czego cenę
+realnie umiemy pobrać. Nie zrzucamy całej listy TD (~17k, w tym śmieci i pozycje bez ceny na
+free tierze) — seedujemy **popularne instrumenty ∩ metadane TD**, a ostateczny test ceny dzieje
+się przy dodawaniu pozycji (add-time guard, niżej).
+
+- **Seed (jednorazowo, przez generator):** `scripts/generate-catalog-seed.ts`.
+  - Akcje = **S&P 500** (publiczny CSV) + `EXTRA_STOCK_TICKERS` (retail-favourites spoza indeksu).
+  - ETF = `ETF_TICKERS` (curated top ~120 wg AUM).
+  - Każdy ticker cross-checkowany z referencyjną listą TD (`/stocks`, `/etf`) — to **metadane,
+    zero kredytów `/price`**. Do katalogu wchodzi tylko przecięcie (popularne ∩ zna-TD).
+  - Wynik (2026-06): **643 wiersze** (515 akcji + 128 ETF), US (NASDAQ/NYSE/Arca/Cboe). EU poza
+    zakresem — TD free tier nie wycenia XETRA/LSE (stąd VWCE/IWDA `active=false`).
+- **Jak rozszerzyć w przyszłości** (pełna instrukcja w nagłówku generatora):
+  - więcej akcji → `EXTRA_STOCK_TICKERS` lub kolejne źródło indeksu (Nasdaq-100, Russell 1000) w `loadPopularStocks()`;
+  - więcej ETF → `ETF_TICKERS`;
+  - inne giełdy → `US_EXCHANGES` (EU dopiero z providerem EU — Faza 4);
+  - po zmianie: `--write` ponownie; `ON CONFLICT DO NOTHING` nie rusza istniejących wierszy.
+
+#### Add-time guard (Faza 2b zaostrzona)
+`POST /holdings` market wycenia asset **przed** insertem: cache → on-demand z providera. Gdy źródło
+rotacji (twelve_data) nie zwraca kursu → **blokada `400`, pozycja nie powstaje** („brak notowań").
+To realny strażnik niezmiennika „katalog ⊆ wyceniarne" — bez kosztu z góry, 1 kredyt na próbę.
+Krypto/metale (własny cron, brak providera w `fetch-prices`) nie są blokowane — cache dosypie cenę.
+- **TODO/rozszerzenie:** samoczyszczenie katalogu (`active=false` po potwierdzonym braku notowań) —
+  wymaga odróżnienia „TD nie ma symbolu" od „chwilowy błąd sieci" (licznik porażek jak `damaged_assets`),
+  żeby transient nie ubił poprawnego assetu. Świadomie zaparkowane.
+
 ### Faza 4 (gdy źródło EU) — provider EU albo manual
 REST + budżet dobowy → `+1 provider` w `fetch-prices`. Dziwny limit → własna funkcja. Do tego czasu `manual`.
 
