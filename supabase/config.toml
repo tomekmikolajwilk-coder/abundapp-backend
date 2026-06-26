@@ -62,6 +62,9 @@ verify_jwt = false
 [functions.fetch-metals]
 verify_jwt = false
 
+[functions.fetch-crypto]
+verify_jwt = false
+
 [functions.snapshot-portfolio]
 verify_jwt = false
 
