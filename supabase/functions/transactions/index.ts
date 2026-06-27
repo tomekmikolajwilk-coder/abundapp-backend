@@ -39,13 +39,16 @@ Deno.serve(async (req) => {
 
     const { data: rows, error } = await supabase
       .from("transactions")
-      .select("id, asset_id, name, category, side, amount, exec_price_usd, value_usd, created_at")
+      // holding_id: front kluczuje pozycje MANUAL (asset_id=null) po id wiersza holdingu
+      // — bez tego rozbicie PnL nie dopina transakcji obligacji/nieruchomości do pozycji.
+      .select("id, holding_id, asset_id, name, category, side, amount, exec_price_usd, value_usd, created_at")
       .eq("user_id", userId)
       .order("created_at", { ascending: false });
     if (error) return serverError(error.message);
 
     const transactions = (rows ?? []).map((t) => ({
       id: t.id,
+      holding_id: t.holding_id,
       asset_id: t.asset_id,
       name: t.name,
       category: t.category,
