@@ -2,6 +2,7 @@ import { getServiceClient, type Supa } from "../_shared/supabase.ts";
 import { json } from "../_shared/http.ts";
 import { sendAlertEmail, writeCronLog } from "../_shared/alerts.ts";
 import type { PriceRow } from "../_shared/types.ts";
+import { eodhdBulkCode, EODHD_BASE, EXCHANGE_MAP } from "../_shared/eodhd.ts";
 
 // Źródło cen akcji/ETF/FX z EODHD (zastępuje Twelve Data). Osobna funkcja standalone, bo model
 // jest inny niż rotacja TD: dane EOD (raz dziennie), pobierane BULKIEM per giełda. Patrz
@@ -18,26 +19,7 @@ import type { PriceRow } from "../_shared/types.ts";
 
 const AUDIT_HOUR_UTC = 23; // w tym runie sprawdzamy „co nie weszło cały dzień" i mailujemy
 
-// Mapowanie giełdy (asset_definitions.exchange) → kod bulk EODHD + waluta notowania.
-// pence=true: LSE kwotuje w pensach (GBX) → cena ÷100 przed przeliczeniem przez kurs GBP.
-// Na start ćwiczone jest tylko US; reszta dormant do seedu EU/PL/Azji.
-const EXCHANGE_MAP: Record<string, { eodhd: string; ccy: string; pence?: boolean }> = {
-  NASDAQ: { eodhd: "US", ccy: "USD" },
-  NYSE: { eodhd: "US", ccy: "USD" },
-  US: { eodhd: "US", ccy: "USD" },
-  WAR: { eodhd: "WAR", ccy: "PLN" },
-  XETRA: { eodhd: "XETRA", ccy: "EUR" },
-  PA: { eodhd: "PA", ccy: "EUR" },
-  AS: { eodhd: "AS", ccy: "EUR" },
-  LSE: { eodhd: "LSE", ccy: "GBP", pence: true },
-  SW: { eodhd: "SW", ccy: "CHF" },
-};
-
 type EquityDef = { asset_id: string; exchange: string; eodhd_exchange: string; ccy: string; pence: boolean };
-
-function eodhdBase(): string {
-  return "https://eodhd.com/api";
-}
 
 // ── Wczytanie kandydatów ─────────────────────────────────────────────────────
 // Equities: trzymane market assety z api_source='eodhd' (demand-driven). Currencies: WSZYSTKIE
@@ -80,7 +62,7 @@ async function fetchFx(apiKey: string, currencies: string[]): Promise<{ rates: M
 
   for (const ccy of currencies) {
     try {
-      const res = await fetch(`${eodhdBase()}/real-time/${ccy}USD.FOREX?api_token=${apiKey}&fmt=json`);
+      const res = await fetch(`${EODHD_BASE}/real-time/${ccy}USD.FOREX?api_token=${apiKey}&fmt=json`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const close = typeof data.close === "number" ? data.close : NaN;
@@ -103,10 +85,11 @@ async function fetchExchange(
   fxRates: Map<string, number>,
 ): Promise<{ rows: PriceRow[]; failed: string[]; requestFailed: boolean }> {
   const now = new Date().toISOString();
-  const url = new URL(`${eodhdBase()}/eod-bulk-last-day/${eodhdExchange}`);
+  const url = new URL(`${EODHD_BASE}/eod-bulk-last-day/${eodhdExchange}`);
   url.searchParams.set("api_token", apiKey);
   url.searchParams.set("fmt", "json");
-  if (eodhdExchange === "US") url.searchParams.set("symbols", defs.map((d) => d.asset_id).join(","));
+  // bulk matchuje po „bare code" (bez sufiksu giełdy): LWB.WAR → LWB.
+  if (eodhdExchange === "US") url.searchParams.set("symbols", defs.map((d) => eodhdBulkCode(d.asset_id)).join(","));
 
   let dump: { code: string; close: number | string }[];
   try {
@@ -128,7 +111,7 @@ async function fetchExchange(
   const rows: PriceRow[] = [];
   const failed: string[] = [];
   for (const d of defs) {
-    const close = closeByCode.get(d.asset_id);
+    const close = closeByCode.get(eodhdBulkCode(d.asset_id));
     if (close === undefined) { failed.push(d.asset_id); continue; }
     // Konwersja na USD: cena × (÷100 jeśli pensy) × kurs(waluta→USD). USD = 1.
     const fx = d.ccy === "USD" ? 1 : fxRates.get(d.ccy);

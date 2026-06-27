@@ -1,17 +1,21 @@
 import { getServiceClient, type Supa } from "../_shared/supabase.ts";
-import { badRequest, json, serverError } from "../_shared/http.ts";
+import { badRequest, json, notFound, serverError } from "../_shared/http.ts";
+import { eodhdAssetId, eodhdSearch, eodhdTypeToCategory, SUPPORTED_EODHD_EXCHANGES } from "../_shared/eodhd.ts";
 
-// Dwa endpointy pod jedną funkcją (Supabase routuje po nazwie funkcji = pierwszym segmencie):
-//   GET /assets               — wszystkie aktywa z kursem, pogrupowane po kategorii (hurt, jak dotąd).
-//   GET /assets/search?q=&category=&exchange=  — paginowany search po katalogu (picker Fazy 3).
-// /assets hurtem ma sens dla małych zbiorów (krypto top-100, waluty, metale); dla tysięcy
-// stock/ETF picker używa /assets/search (search-as-you-type, trigram po nazwie/tickerze).
+// Endpointy pod jedną funkcją (Supabase routuje po nazwie funkcji = pierwszym segmencie):
+//   GET  /assets               — wszystkie aktywa z kursem, pogrupowane po kategorii (hurt).
+//   GET  /assets/search?q=…    — paginowany search po NASZYM katalogu (picker, trigram).
+//   GET  /assets/discover?q=…  — szuka w EODHD tego, czego NIE mamy w katalogu (request-asset).
+//   POST /assets/request {code,exchange} — dodaje wybrany ticker z EODHD do asset_definitions.
+// Katalog trzymamy mały (popularne) → szybki search; długi ogon dochodzi na żądanie usera.
 Deno.serve(async (req) => {
   const supabase = getServiceClient();
   const url = new URL(req.url);
   const last = url.pathname.split("/").filter(Boolean).pop();
 
   try {
+    if (last === "discover") return await handleDiscover(supabase, url);
+    if (last === "request") return await handleRequest(supabase, req);
     if (last === "search") return await handleSearch(supabase, url);
     return await handleAll(supabase);
   } catch (err) {
@@ -109,6 +113,85 @@ async function handleSearch(supabase: Supa, url: URL): Promise<Response> {
 
   console.log(`[assets/search] q="${q}" cat=${category ?? "-"} exch=${exchange ?? "-"} → ${results.length} (more=${hasMore})`);
   return json({ results, limit, offset, has_more: hasMore });
+}
+
+// ── GET /assets/discover?q= — szukaj w EODHD tego, czego nie ma w katalogu ─────
+// Zwraca kandydatów (akcje/ETF z obsługiwanych giełd) z flagą in_catalog. Front pokazuje
+// listę „nie znalazłeś? oto co jest w EODHD" → user wybiera → POST /assets/request.
+async function handleDiscover(supabase: Supa, url: URL): Promise<Response> {
+  const q = (url.searchParams.get("q") ?? "").trim();
+  if (q.length < 2) return badRequest("discover: wymagane q (≥2 znaki)");
+  const apiKey = Deno.env.get("EODHD_API_KEY");
+  if (!apiKey) return serverError("Brak EODHD_API_KEY");
+
+  const hits = await eodhdSearch(apiKey, q);
+  // Tylko obsługiwane giełdy (mamy FX) + typy stock/etf. Odrzuca cross-listingi z egzotyk,
+  // tokenizowane (CC), lewarowane spoza naszych giełd itd.
+  const candidates = hits
+    .filter((h) => SUPPORTED_EODHD_EXCHANGES.has(h.Exchange) && eodhdTypeToCategory(h.Type) !== null)
+    .map((h) => ({ hit: h, assetId: eodhdAssetId(h.Code, h.Exchange), category: eodhdTypeToCategory(h.Type)! }));
+
+  const ids = [...new Set(candidates.map((c) => c.assetId))];
+  const have = new Set<string>();
+  if (ids.length > 0) {
+    const { data } = await supabase.from("asset_definitions").select("asset_id").in("asset_id", ids);
+    for (const r of data ?? []) have.add(r.asset_id as string);
+  }
+
+  const results = candidates.map((c) => ({
+    asset_id: c.assetId,
+    code: c.hit.Code,
+    exchange: c.hit.Exchange,
+    display_name: c.hit.Name,
+    category: c.category,
+    currency: c.hit.Currency ?? null,
+    in_catalog: have.has(c.assetId),
+  }));
+  console.log(`[assets/discover] q="${q}" → ${results.length} kandydatów`);
+  return json({ query: q, results });
+}
+
+// ── POST /assets/request {code, exchange} — dodaj ticker z EODHD do katalogu ───
+// Idempotentne: jak już jest w katalogu, zwraca istniejący. Weryfikuje w EODHD (Code+Exchange,
+// typ stock/etf) zanim doda — czyli „jeśli jest w EODHD to dodajemy, jak nie ma to trudno".
+async function handleRequest(supabase: Supa, req: Request): Promise<Response> {
+  const apiKey = Deno.env.get("EODHD_API_KEY");
+  if (!apiKey) return serverError("Brak EODHD_API_KEY");
+
+  let body: Record<string, unknown> | null;
+  try { body = await req.json(); } catch { return badRequest("Nieprawidłowy JSON"); }
+  const code = typeof body?.code === "string" ? body.code.trim() : "";
+  const exchange = typeof body?.exchange === "string" ? body.exchange.trim() : "";
+  if (!code || !exchange) return badRequest("request: wymagane code + exchange");
+  if (!SUPPORTED_EODHD_EXCHANGES.has(exchange)) return badRequest(`Giełda ${exchange} nieobsługiwana`);
+
+  const assetId = eodhdAssetId(code, exchange);
+
+  // Już w katalogu → idempotentnie zwróć (nie traktuj jako błąd).
+  const { data: existing } = await supabase
+    .from("asset_definitions").select("asset_id, category, display_name, exchange, country")
+    .eq("asset_id", assetId).maybeSingle();
+  if (existing) return json({ added: false, asset: existing });
+
+  // Weryfikacja w EODHD: dokładny Code+Exchange o typie stock/etf.
+  const hits = await eodhdSearch(apiKey, code);
+  const hit = hits.find((h) => h.Code === code && h.Exchange === exchange && eodhdTypeToCategory(h.Type) !== null);
+  if (!hit) return notFound(`${code}.${exchange} nie znaleziony w EODHD (lub nieobsługiwany typ)`);
+
+  const { data, error } = await supabase.from("asset_definitions").insert({
+    asset_id: assetId,
+    category: eodhdTypeToCategory(hit.Type)!,
+    api_source: "eodhd",
+    api_symbol: `${code}.${exchange}`, // EODHD nie czyta tego pola (NOT NULL) — kładziemy symbol EODHD
+    display_name: hit.Name,
+    exchange,
+    country: hit.Country ?? null,
+    active: true,
+  }).select("asset_id, category, display_name, exchange, country").single();
+  if (error) return serverError(error.message);
+
+  console.log(`[assets/request] dodano ${assetId} (${hit.Name})`);
+  return json({ added: true, asset: data }, 201);
 }
 
 // Parsuje int z query-param z domyślną wartością i zakresem; nie-liczba → default.

@@ -348,6 +348,23 @@ funkcji co `/assets`.
 - `has_more` liczone trickiem limit+1 (bez `COUNT(*)` po całym katalogu).
 - Zwraca **metadane** (bez kursu) — held assety z kursem idą przez `/portfolio`.
 
+### `GET /assets/discover?q=` — request-asset (samorozszerzanie katalogu)
+Katalog trzymamy **mały (popularne)** → szybki search. Gdy user nie znajduje tickera w `/search`,
+front woła `/discover` — szuka w **EODHD** tego, czego nie mamy. Routuje do funkcji `assets`.
+- Filtruje do **obsługiwanych giełd** (mamy FX) + typów **Common Stock / ETF** (odcina FUND, Warrant…).
+- Każdy kandydat ma `in_catalog` (czy już go mamy).
+```json
+{ "query": "bogdanka", "results": [
+  { "asset_id": "LWB.WAR", "code": "LWB", "exchange": "WAR", "display_name": "Lubelski Wegiel Bogdanka S.A.", "category": "stock", "currency": "PLN", "in_catalog": false }
+]}
+```
+- `asset_id`: US = bare (`AAPL`), nie-US = `CODE.EXCHANGE` (bo ten sam Code bywa różną spółką na różnych giełdach).
+
+### `POST /assets/request` `{ code, exchange }` — dodaj ticker do katalogu
+Dodaje wybranego kandydata z `/discover` do `asset_definitions` (`api_source='eodhd'`). Idempotentne
+(jest już → zwraca istniejący). Weryfikuje w EODHD (Code+Exchange, typ stock/etf) — **jest w EODHD
+→ dodajemy; nie ma → 404**. Po dodaniu ticker jest w katalogu → user może go dodać do portfela.
+
 ### `GET /portfolio`
 Live portfolio — liczone na bieżąco z `holdings × price_cache`.
 Każde wywołanie zapisuje synchronicznie visit-snapshot (jeden wiersz na usera).
