@@ -13,7 +13,9 @@
 
 // ── Parametry ─────────────────────────────────────────────────────────────
 // User tworzony ręcznie w dashboardzie (Auth → Add user) → tu tylko jego dane.
-const DEMO_UUID = "b2bb90dc-4304-41c7-821a-1cb966d30cce";
+const DEMO_UUID = "0bf62ec8-b589-4aee-8b7a-81a4ee866151";
+// Poprzednie demo-UUID do posprzątania (przepięcie portfela na nowego usera).
+const PREV_UUIDS = ["b2bb90dc-4304-41c7-821a-1cb966d30cce"];
 const PREFERRED = "PLN";
 const DAYS = 240; // długość historii konta (dni wstecz od dziś)
 
@@ -142,6 +144,18 @@ function main() {
   out.push(`-- Konto auth (${DEMO_UUID}) utworzone ręcznie w dashboardzie — tu tylko dane portfela.`);
   out.push(``);
 
+  // 0. Sprzątanie poprzednich demo-userów (przepięcie portfela). Snapshoty/transakcje/holdingi
+  //    starego UUID kasujemy, by nie zostały dwa demo-portfele. Profil starego zostawiamy
+  //    (zniknie sam, gdy usuniesz konto auth w dashboardzie — CASCADE).
+  if (PREV_UUIDS.length > 0) {
+    const list = PREV_UUIDS.map(lit).join(", ");
+    out.push(`-- 0. Sprzątanie poprzednich demo-userów`);
+    out.push(`delete from public.portfolio_snapshots where user_id in (${list});`);
+    out.push(`delete from public.transactions where user_id in (${list});`);
+    out.push(`delete from public.holdings where user_id in (${list});`);
+    out.push(``);
+  }
+
   // 1. Profil — trigger on_auth_user_created już wstawił wiersz przy tworzeniu usera w dashboardzie.
   //    Tu tylko ustawiamy preferred_currency=PLN i cofamy created_at (realizm „konto sprzed ${DAYS} dni").
   out.push(`-- 1. Profil (wiersz istnieje z triggera; ustawiamy walutę i datę założenia)`);
@@ -234,7 +248,7 @@ function main() {
   out.push(``);
 
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const path = `supabase/migrations/${stamp}000020_demo_user.sql`;
+  const path = `supabase/migrations/${stamp}000021_demo_user_repoint.sql`;
   Deno.writeTextFileSync(path, out.join("\n") + "\n");
 
   // Statystyki na stdout.
