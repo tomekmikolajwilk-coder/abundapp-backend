@@ -1,5 +1,5 @@
 import { getServiceClient, type Supa } from "../_shared/supabase.ts";
-import { badRequest, json, notFound, serverError } from "../_shared/http.ts";
+import { badRequest, json, notFound, serverError, serviceUnavailable } from "../_shared/http.ts";
 import { resolveUserId } from "../_shared/auth.ts";
 import { execPriceUsd, recordTransaction } from "../_shared/transactions.ts";
 import { getProvider } from "../_shared/price_providers/index.ts";
@@ -62,41 +62,49 @@ async function parseBody(req: Request): Promise<Record<string, unknown> | null> 
 // Best-effort: tylko dla źródeł z providerem rotacji (twelve_data). Źródła z własnym cronem
 // (coingecko → fetch-crypto co 5 min) nie mają providera tutaj — cena dosypie się sama wkrótce.
 // Porażka nie blokuje utworzenia pozycji (jak reszta przepływu ledgera).
+// Zwraca cenę oraz `transient` — czy brak ceny wynika z czkawki źródła (cały request padł),
+// czy z genuine braku notowań dla symbolu. To rozróżnienie steruje potem 503 vs 400.
 async function fetchPriceOnDemand(
   supabase: Supa,
   assetId: string,
   apiSource: string,
   apiSymbol: string,
-): Promise<number | null> {
+): Promise<{ price: number | null; transient: boolean }> {
   const provider = getProvider(apiSource);
-  if (!provider) return null;
+  if (!provider) return { price: null, transient: false };
   try {
-    const { rows } = await provider.fetchBatch([{ asset_id: assetId, api_symbol: apiSymbol }]);
-    if (rows.length === 0) return null;
-    await supabase.from("price_cache").upsert(rows, { onConflict: "asset_id" });
-    console.log(`[holdings] on-demand: pobrano kurs ${assetId} = ${rows[0].price_usd}`);
-    return rows[0].price_usd;
+    const { rows, requestFailed } = await provider.fetchBatch([{ asset_id: assetId, api_symbol: apiSymbol }]);
+    if (rows.length > 0) {
+      await supabase.from("price_cache").upsert(rows, { onConflict: "asset_id" });
+      console.log(`[holdings] on-demand: pobrano kurs ${assetId} = ${rows[0].price_usd}`);
+      return { price: rows[0].price_usd, transient: false };
+    }
+    // Brak ceny: czkawka źródła (cały request padł) vs genuine brak notowań symbolu.
+    return { price: null, transient: requestFailed === true };
   } catch (err) {
+    // fetchBatch sam łapie błędy, ale gdyby coś przeszło — traktujemy jako przejściowe.
     console.warn(`[holdings] on-demand fetch ${assetId} nieudany: ${String(err)}`);
-    return null;
+    return { price: null, transient: true };
   }
 }
 
-// Add-time guard ceny dla pozycji market. Zwraca wycenę (jeśli znana) i czy DODANIE blokujemy.
+// Add-time guard ceny dla pozycji market. Zwraca wycenę (jeśli znana) oraz, gdy blokujemy,
+// czy powód jest przejściowy (`transient`) — od tego zależy czy front pokaże „spróbuj ponownie".
 //   - cache ma kurs            → { price, blocked:false }
-//   - brak + provider rotacji  → on-demand; sukces → cena, porażka → blocked (genuine brak notowań)
+//   - brak + provider rotacji  → on-demand; sukces → cena; brak → blocked (+ transient gdy czkawka)
 //   - brak + brak providera    → { price:null, blocked:false } (crypto/metal: własny cron dosypie cenę)
 async function resolveMarketPrice(
   supabase: Supa,
   assetId: string,
   apiSource: string,
   apiSymbol: string,
-): Promise<{ price: number | null; blocked: boolean }> {
+): Promise<{ price: number | null; blocked: boolean; transient: boolean }> {
   const cached = await execPriceUsd(supabase, { price_source: "market", asset_id: assetId, unit_value: null, currency: null });
-  if (cached != null) return { price: cached, blocked: false };
-  if (!getProvider(apiSource)) return { price: null, blocked: false };
-  const fetched = await fetchPriceOnDemand(supabase, assetId, apiSource, apiSymbol);
-  return fetched != null ? { price: fetched, blocked: false } : { price: null, blocked: true };
+  if (cached != null) return { price: cached, blocked: false, transient: false };
+  if (!getProvider(apiSource)) return { price: null, blocked: false, transient: false };
+  const { price, transient } = await fetchPriceOnDemand(supabase, assetId, apiSource, apiSymbol);
+  if (price != null) return { price, blocked: false, transient: false };
+  return { price: null, blocked: true, transient };
 }
 
 async function createHolding(supabase: Supa, userId: string, req: Request): Promise<Response> {
@@ -120,10 +128,12 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
     }
 
     // Add-time guard: wyceniamy PRZED insertem — pozycja bez kursu nie wchodzi do portfela.
-    // Brak ceny ze źródła rotacji (np. twelve_data nie ma notowań) → blokada, nic nie tworzymy.
-    const { price, blocked } = await resolveMarketPrice(supabase, asset_id, def.api_source as string, def.api_symbol as string);
+    // Rozróżniamy: czkawka źródła (503, „spróbuj ponownie") vs trwały brak notowań (400, „wybierz inne").
+    const { price, blocked, transient } = await resolveMarketPrice(supabase, asset_id, def.api_source as string, def.api_symbol as string);
     if (blocked) {
-      return badRequest(`Brak notowań dla ${asset_id} — nie można dodać pozycji (źródło ceny nie zwraca kursu).`);
+      return transient
+        ? serviceUnavailable(`Chwilowy problem z pobraniem kursu dla ${asset_id} — spróbuj ponownie za chwilę.`)
+        : badRequest(`Brak notowań dla ${asset_id} — nie można dodać pozycji (źródło ceny nie zwraca kursu).`);
     }
 
     const { data, error: insErr } = await supabase.from("holdings").insert({

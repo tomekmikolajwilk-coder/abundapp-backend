@@ -4,10 +4,18 @@ import type { PriceRow } from "../types.ts";
 export type ProviderAsset = { asset_id: string; api_symbol: string };
 
 // Wynik pobrania batcha:
-//   rows   — pobrane ceny (→ price_cache),
-//   failed — asset_id których nie udało się pobrać (→ licznik damaged_assets),
-//   errors — ludzkie komunikaty (→ cron_logs.warnings / mail).
-export type FetchBatchResult = { rows: PriceRow[]; failed: string[]; errors: string[] };
+//   rows         — pobrane ceny (→ price_cache),
+//   failed       — asset_id których nie udało się pobrać (→ licznik damaged_assets),
+//   errors       — ludzkie komunikaty (→ cron_logs.warnings / mail).
+//   requestFailed — true gdy padło CAŁE żądanie (HTTP≠200, wyjątek, brak klucza), a nie
+//                   pojedynczy symbol. Rotacja to ignoruje; on-demand w holdings rozróżnia
+//                   po tym transient (cały request) od genuine (symbol bez notowań) → 503 vs 400.
+export type FetchBatchResult = {
+  rows: PriceRow[];
+  failed: string[];
+  errors: string[];
+  requestFailed?: boolean;
+};
 
 // Provider = małe, deklaratywne źródło ceny pasujące do silnika rotacji fetch-prices:
 // deklaruje własny batchSize (budżet na jedno wywołanie) + sam request (fetchBatch).

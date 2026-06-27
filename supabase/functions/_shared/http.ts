@@ -16,6 +16,13 @@ export function notFound(message: string): Response {
   return json({ error: message }, 404);
 }
 
+// 503 — usługa chwilowo niedostępna (np. zewnętrzne źródło ceny miało czkawkę).
+// `transient: true` mówi frontendowi „to przejściowe, user może spróbować ponownie"
+// — w odróżnieniu od 400, które oznacza trwały brak (np. symbol bez notowań).
+export function serviceUnavailable(message: string): Response {
+  return json({ error: message, transient: true }, 503);
+}
+
 export function serverError(message: string): Response {
   return json({ error: message }, 500);
 }

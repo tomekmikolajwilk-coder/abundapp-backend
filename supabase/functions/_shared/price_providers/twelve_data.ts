@@ -13,7 +13,8 @@ async function fetchBatch(assets: ProviderAsset[]): Promise<FetchBatchResult> {
   const apiKey = Deno.env.get("TWELVE_DATA_API_KEY");
   if (!apiKey) {
     // Brak klucza nie wywala całego runa (mogą być inni providerzy) — wszystkie liczymy jako failed.
-    return { rows: [], failed: assets.map((a) => a.asset_id), errors: ["Brak TWELVE_DATA_API_KEY"] };
+    // requestFailed: to nie „symbol bez notowań" tylko awaria konfiguracji = transient z perspektywy usera.
+    return { rows: [], failed: assets.map((a) => a.asset_id), errors: ["Brak TWELVE_DATA_API_KEY"], requestFailed: true };
   }
 
   const symbols = assets.map((s) => s.api_symbol);
@@ -52,10 +53,11 @@ async function fetchBatch(assets: ProviderAsset[]): Promise<FetchBatchResult> {
     console.log(`[TwelveData] OK: ${rows.length}, błędy: ${failed.length}`);
     return { rows, failed, errors };
   } catch (err) {
-    // Żądanie padło w całości — wszystkie wybrane assety liczymy jako nieudane.
+    // Żądanie padło w całości (HTTP≠200, sieć) — wszystkie assety nieudane, ale to AWARIA
+    // REQUESTU, nie brak notowań symbolu → requestFailed=true (on-demand zmapuje na 503/transient).
     const msg = `TwelveData request: ${String(err)}`;
     console.error(`[TwelveData] ❌ ${msg}`);
-    return { rows: [], failed: assets.map((s) => s.asset_id), errors: [msg] };
+    return { rows: [], failed: assets.map((s) => s.asset_id), errors: [msg], requestFailed: true };
   }
 }
 
