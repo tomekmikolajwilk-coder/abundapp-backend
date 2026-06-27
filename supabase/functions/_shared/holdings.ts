@@ -53,6 +53,7 @@ export function buildBreakdown(
     let priceUsd: number;
     let category = row.category;
     let interestRate: number | null = null;
+    let interestRatio = 0; // udział odsetek w wartości (obligacje); 0 dla reszty
 
     if (row.price_source === "market") {
       const info = priceMap[row.asset_id ?? ""];
@@ -70,8 +71,12 @@ export function buildBreakdown(
       }
       let unit = row.unit_value as number;
       if (row.category === "bonds" && row.interest_rate != null && row.start_date) {
-        unit *= bondFactor(row.interest_rate, row.start_date, now);
+        const factor = bondFactor(row.interest_rate, row.start_date, now);
+        unit *= factor;
         interestRate = row.interest_rate;
+        // Udział naliczonych odsetek w wartości (walutowo-niezmienny): wartość = principal × factor,
+        // odsetki = wartość − principal = wartość × (factor−1)/factor.
+        interestRatio = factor > 0 ? (factor - 1) / factor : 0;
       }
       priceUsd = unit * fx; // efektywna cena jednostki w USD (z odsetkami dla obligacji)
     }
@@ -91,6 +96,7 @@ export function buildBreakdown(
       name: row.price_source === "manual" ? row.name : null,
       display_category: row.display_category ?? null,
       interest_rate: interestRate,
+      interest_ratio: interestRatio,
       // Natywna wycena pozycji manual — front czyta ją, by wiedzieć, w jakiej walucie
       // pozwolić edytować unit_value. Zwracamy BAZOWY unit_value (bez naliczonych odsetek
       // obligacji), bo to wartość, którą user wpisał i którą edytuje.

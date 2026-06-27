@@ -19,6 +19,8 @@ export type HoldingEntry = {
   name?: string | null;                  // nazwa custom assetu (manual); null dla market
   display_category?: string | null;      // kategoria wyświetlania; null = jak category
   interest_rate?: number | null;         // roczna stopa % (obligacje); null gdy brak
+  interest_ratio?: number;               // udział naliczonych odsetek w wartości = (factor−1)/factor;
+                                         // walutowo-niezmienny (front: odsetki = value_ccy × ratio). 0 dla nie-obligacji.
   unit_value?: number | null;            // natywna cena jednostki (manual, w unit_currency); null dla market
   unit_currency?: string | null;         // waluta natywna pozycji (manual, z POST custom.currency); null dla market
 };
