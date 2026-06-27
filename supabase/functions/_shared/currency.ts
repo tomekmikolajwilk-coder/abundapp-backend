@@ -17,6 +17,11 @@ export async function resolveSelectedCurrency(
 ): Promise<CurrencyResult> {
   if (!param) return { ok: true, price: null };
 
+  // USD = waluta bazowa: nie ma jej w asset_definitions/price_cache, kurs = 1 z definicji.
+  // Bez tego /portfolio?currency=USD (i /last-visit, /value-history) zwracało 400, mimo że
+  // front celowo oferuje USD w pickerze. /transactions obsługiwało USD osobno — teraz spójnie.
+  if (param === "USD") return { ok: true, price: 1 };
+
   const [defResult, priceResult] = await Promise.all([
     supabase.from("asset_definitions").select("asset_id")
       .eq("asset_id", param).eq("category", "currency").eq("active", true).single(),
