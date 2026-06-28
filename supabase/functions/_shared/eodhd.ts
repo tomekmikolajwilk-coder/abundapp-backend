@@ -1,12 +1,12 @@
-// Wspólne dla EODHD: mapa giełd + helper /search. Używają tego fetch-eod (pobieranie cen)
-// oraz assets (/discover, /request — samorozszerzanie katalogu na żądanie usera).
+// Wspólne dla EODHD: mapa giełd + helpery symboli. Używa tego fetch-eod (pobieranie cen)
+// oraz sync-catalog (mirror listy EODHD → asset_definitions).
 
 export const EODHD_BASE = "https://eodhd.com/api";
 
 // Giełda (asset_definitions.exchange LUB kod EODHD) → kod bulk EODHD + waluta notowania.
 // pence=true: LSE kwotuje w pensach (GBX) → cena ÷100 przed przeliczeniem przez kurs GBP.
 // Klucze obejmują i format katalogu US (NASDAQ/NYSE), i kody EODHD (US/WAR/XETRA…), bo asset
-// dodany przez /request trzyma kod EODHD, a stary seed US trzyma NASDAQ/NYSE.
+// z sync-catalog trzyma kod EODHD (US), a stary ręczny seed US trzyma NASDAQ/NYSE.
 export const EXCHANGE_MAP: Record<string, { eodhd: string; ccy: string; pence?: boolean }> = {
   NASDAQ: { eodhd: "US", ccy: "USD" },
   NYSE: { eodhd: "US", ccy: "USD" },
@@ -27,8 +27,8 @@ export const EXCHANGE_MAP: Record<string, { eodhd: string; ccy: string; pence?: 
   SHE: { eodhd: "SHE", ccy: "CNY" },
 };
 
-// Giełdy, które realnie umiemy wycenić (mamy dla nich kurs FX). Tylko z tych dopuszczamy
-// /discover i /request. (JP/IN poza — EODHD nie ma ich giełd na tym planie.)
+// Giełdy, które realnie umiemy wycenić (mamy dla nich kurs FX). sync-catalog mirroruje tylko te.
+// (JP/IN poza — EODHD nie ma ich giełd na tym planie.)
 export const SUPPORTED_EODHD_EXCHANGES = new Set([
   "US", "WAR", "XETRA", "PA", "AS", "LSE", "SW", // US + Europa
   "HK", "KO", "KQ", "TW", "TWO", "SHG", "SHE", // Azja (Chiny/HK, Korea, Tajwan)
@@ -56,24 +56,3 @@ export function eodhdBulkCode(assetId: string): string {
   return dot === -1 ? assetId : assetId.slice(0, dot);
 }
 
-export type EodhdSearchHit = {
-  Code: string;
-  Exchange: string;
-  Name: string;
-  Type: string;
-  Currency?: string;
-  Country?: string;
-};
-
-// EODHD /search — zwraca dopasowania po nazwie/tickerze ze WSZYSTKICH giełd (cross-listingi,
-// ten sam ticker różne spółki, lewarowane/tokenizowane). Filtrowanie zostawiamy wołającemu.
-export async function eodhdSearch(apiKey: string, query: string, limit = 30): Promise<EodhdSearchHit[]> {
-  const url = new URL(`${EODHD_BASE}/search/${encodeURIComponent(query)}`);
-  url.searchParams.set("api_token", apiKey);
-  url.searchParams.set("fmt", "json");
-  url.searchParams.set("limit", String(limit));
-  const res = await fetch(url.toString());
-  if (!res.ok) throw new Error(`EODHD search HTTP ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data) ? data as EodhdSearchHit[] : [];
-}

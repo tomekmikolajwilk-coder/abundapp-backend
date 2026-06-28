@@ -68,6 +68,9 @@ verify_jwt = false
 [functions.fetch-eod]
 verify_jwt = false
 
+[functions.sync-catalog]
+verify_jwt = false
+
 [functions.snapshot-portfolio]
 verify_jwt = false
 

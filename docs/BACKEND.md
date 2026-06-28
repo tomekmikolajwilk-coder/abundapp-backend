@@ -161,8 +161,9 @@ Katalog wszystkich obsługiwanych aktywów — **źródło prawdy** dla `categor
 | `active` | boolean | `false` = ukryty bez usuwania (wypada z fetchy i pickerów) |
 
 - RLS: publiczny odczyt (frontend potrzebuje do pickera), zapis tylko service_role.
-- **Niezmiennik:** katalog ⊆ wyceniarne — każdy wiersz ma `(api_source, api_symbol)`, które
-  jakiś provider potrafi pobrać. Stock/ETF seedowane z listy Twelve Data (= jej pokrycie cen).
+- **Stock/ETF** = mirror EODHD (funkcja `sync-catalog`, Common Stock + ETF z obsługiwanych giełd) →
+  dziesiątki tysięcy wierszy, same metadane. Wycena demand-driven (`fetch-eod` bierze tylko trzymane),
+  więc rozmiar katalogu nie kosztuje. Krypto/metale/waluty seedowane osobno (małe zbiory).
 - Trigramowe indeksy (pg_trgm) na `display_name`/`asset_id` pod `/assets/search`.
 
 ### `price_sources`
@@ -317,12 +318,13 @@ Po Fazie 4 każda klasa aktywów ma **dedykowane źródło** (provider-agnostycz
   - **Azja**: HK (Hongkong), KO/KQ (Korea), TW/TWO (Tajwan), SHG/SHE (Chiny).
   - Cena natywna → USD przez kurs FX (waluty EUR/GBP/CHF/PLN + HKD/KRW/TWD/CNY w katalogu).
 - **Poza zasięgiem planu:** **Japonia** (Tokio/JPX) i **Indie** (NSE/BSE) — drogie licencje, brak na tym tierze.
-- **Długi ogon** (dowolna spółka/ETF z obsługiwanej giełdy) dochodzi na żądanie: `/assets/discover` + `/assets/request`.
+- **Cały katalog** (każda spółka/ETF z obsługiwanej giełdy) jest **mirrorowany do `asset_definitions`**
+  przez `sync-catalog` (cron). Picker szuka lokalnie po wszystkim; wycena demand-driven, więc rozmiar darmowy.
 
 ### Endpointy EODHD
 - `eod-bulk-last-day/{EXCHANGE}` — 1 call = cały EOD giełdy (US z filtrem `symbols=`; nie-US pełny dump + filtr w kodzie).
 - `real-time/{CCY}USD.FOREX` — kurs waluty (FX), `close` = kurs wprost.
-- `search/{q}` — wyszukiwarka do `/assets/discover` (request-asset).
+- `exchange-symbol-list/{EXCHANGE}` — pełna lista tickerów giełdy (metadane) → `sync-catalog`.
 - `api_symbol` **nie jest czytany** — symbol/giełda wyprowadzane z metadanych (`exchange`/`country`), `asset_id` US=bare / nie-US=`CODE.EXCHANGE`.
 
 **Uwaga:** Metals.Dev (100/mies.) i CoinGecko (bulk) NIE pasują do rotacji — stąd własne funkcje.
@@ -349,40 +351,21 @@ Hurtem ma sens dla małych zbiorów (krypto, waluty, metale). Dla tysięcy stock
 używa `/assets/search` — `/assets` ich nie zwraca w całości (zwraca tylko to, co ma kurs w cache).
 
 ### `GET /assets/search`
-Paginowany search po katalogu (picker search-as-you-type, Faza 3). Routuje do tej samej
-funkcji co `/assets`.
-- Parametry: `q` (podłańcuch nazwy/tickera, ≥2 znaki), `category`, `exchange`, `limit` (≤50, dom. 20), `offset`, `include_eodhd`.
+Paginowany search po katalogu (picker search-as-you-type). Katalog to **mirror EODHD**
+(`sync-catalog`), więc szukasz po WSZYSTKIM, co EODHD wspiera — czysto lokalnie (pg_trgm),
+bez calli do EODHD. Routuje do tej samej funkcji co `/assets`.
+- Parametry: `q` (podłańcuch nazwy/tickera, ≥2 znaki), `category`, `exchange`, `limit` (≤50, dom. 20), `offset`.
 - Wymaga **`q` lub `category`** (inaczej 400 — bez tego zwracałby cały katalog).
-- `q` → trigramowy ILIKE po `display_name` i `asset_id` (indeksy pg_trgm).
-- **`include_eodhd=true`** → po wynikach lokalnych dokleja kandydatów z EODHD spoza katalogu
-  (np. `UEC`), oznaczonych `in_catalog:false` → user szuka po WSZYSTKIM, co EODHD wspiera, jednym
-  callem. Tylko 1. strona (`offset=0`); EODHD-fold-in best-effort (jak padnie → tylko lokalne).
-  Wynik z `in_catalog:true` = dodajesz wprost; `in_catalog:false` = najpierw `POST /assets/request`.
+- `q` → trigramowy ILIKE po `display_name` i `asset_id` (indeksy pg_trgm; szybkie nawet na ~100k wierszy).
 ```json
 {
-  "results": [{ "asset_id": "AAPL", "category": "stock", "display_name": "Apple Inc", "exchange": "NASDAQ", "country": "US" }],
+  "results": [{ "asset_id": "AAPL", "category": "stock", "display_name": "Apple Inc", "exchange": "US", "country": "United States" }],
   "limit": 20, "offset": 0, "has_more": false
 }
 ```
 - `has_more` liczone trickiem limit+1 (bez `COUNT(*)` po całym katalogu).
-- Zwraca **metadane** (bez kursu) — held assety z kursem idą przez `/portfolio`.
-
-### `GET /assets/discover?q=` — request-asset (samorozszerzanie katalogu)
-Katalog trzymamy **mały (popularne)** → szybki search. Gdy user nie znajduje tickera w `/search`,
-front woła `/discover` — szuka w **EODHD** tego, czego nie mamy. Routuje do funkcji `assets`.
-- Filtruje do **obsługiwanych giełd** (mamy FX) + typów **Common Stock / ETF** (odcina FUND, Warrant…).
-- Każdy kandydat ma `in_catalog` (czy już go mamy).
-```json
-{ "query": "bogdanka", "results": [
-  { "asset_id": "LWB.WAR", "code": "LWB", "exchange": "WAR", "display_name": "Lubelski Wegiel Bogdanka S.A.", "category": "stock", "currency": "PLN", "in_catalog": false }
-]}
-```
-- `asset_id`: US = bare (`AAPL`), nie-US = `CODE.EXCHANGE` (bo ten sam Code bywa różną spółką na różnych giełdach).
-
-### `POST /assets/request` `{ code, exchange }` — dodaj ticker do katalogu
-Dodaje wybranego kandydata z `/discover` do `asset_definitions` (`api_source='eodhd'`). Idempotentne
-(jest już → zwraca istniejący). Weryfikuje w EODHD (Code+Exchange, typ stock/etf) — **jest w EODHD
-→ dodajemy; nie ma → 404**. Po dodaniu ticker jest w katalogu → user może go dodać do portfela.
+- Zwraca **metadane** (bez kursu) — held assety z kursem idą przez `/portfolio`. Dodanie pozycji
+  po `asset_id` przez `POST /holdings` (aktywo zawsze jest w katalogu, bo cały EODHD jest zmirrorowany).
 
 ### `GET /portfolio`
 Live portfolio — liczone na bieżąco z `holdings × price_cache`.
@@ -550,6 +533,14 @@ dane **EOD** (raz dziennie), pobierane **bulkiem per giełda**. Patrz `docs/PRIC
   pozycjami, max raz dziennie. Pojedyncza giełda z błędem requestu w danym runie → `cron_logs.warnings`.
 - Sekret `EODHD_API_KEY`. **Rewers do TD**: patrz migracja `..._eodhd_cutover.sql` (blok ROLLBACK).
 
+### `sync-catalog` (raz w tygodniu) — mirror katalogu EODHD
+Napełnia `asset_definitions` **wszystkimi** akcjami/ETF z obsługiwanych giełd (`exchange-symbol-list`
+per giełda → filtr Common Stock + ETF → upsert). Dzięki temu picker szuka lokalnie po całym EODHD,
+a wycena i tak jest demand-driven (rozmiar katalogu = darmowy). Patrz `docs/PRICING_REDESIGN.md`.
+- `?exchange=US` → tylko ta giełda (na wypadek timeoutu na pełnym przebiegu); brak → wszystkie.
+- Upsert chunkami po 1000; błąd części giełd → `cron_logs.warnings` + mail (rzadki cron, brak spamu).
+- Delistingi: na razie nie deaktywujemy znikniętych (tylko add/update) — do rozważenia później.
+
 ### `snapshot-portfolio` (codziennie, 7:00 UTC)
 Dzienny cron-snapshot dla **wszystkich** userów (`source='cron'`).
 - Usuwa istniejący dzisiejszy cron-snapshot, liczy świeży z `price_cache`, wstawia.
@@ -568,6 +559,7 @@ Konfigurowany **ręcznie** w Supabase SQL Editor (nie w migracjach):
 | Job | Harmonogram | Cron expr |
 |-----|-------------|-----------|
 | `fetch-eod` (EODHD — akcje/ETF/FX, docelowe) | co godzinę | `0 * * * *` |
+| `sync-catalog` (mirror EODHD → asset_definitions) | raz w tygodniu | `0 3 * * 1` |
 | `fetch-prices` (TD — **uśpione** po cutoverze) | co 15 min | `*/15 * * * *` |
 | `fetch-crypto` | co 15 min | `*/15 * * * *` |
 | `fetch-metals` | co 2 dni, 6:00 UTC | `0 6 */2 * *` |
