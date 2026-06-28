@@ -488,7 +488,11 @@ Historia przepływów usera (`JWT`, `user_id` z claim `sub`). Lista **malejąco 
 
 Te funkcje odpala pg_cron (nie frontend). Każda loguje do `cron_logs` i wysyła mail przy awarii.
 
-### `fetch-prices` (co 15 min)
+### `fetch-prices` (co 15 min) — **UŚPIONE** po cutoverze na EODHD (Faza 4)
+> Cron `fetch-prices` jest **wyłączony** (`cron.unschedule`), bo akcje/ETF/FX przejął `fetch-eod` (EODHD).
+> Kod, provider `twelve_data` i `api_symbol` **zostają nietknięte** — rewers do TD = flip `api_source`
+> + włączenie crona, bez redeployu. Poniższy opis dotyczy działania, gdy job jest aktywny.
+
 Silnik rotacji cen — **demand-driven + multi-provider** (patrz `docs/PRICING_REDESIGN.md` Faza 2).
 - **Kandydaci = aktywa faktycznie trzymane** (`DISTINCT holdings.asset_id` gdzie `price_source='market'`)
   **∪ wszystkie aktywne waluty** (FX-szkielet konwersji `preferred_currency`/`?currency=` — bierzemy
@@ -520,9 +524,11 @@ jedno żądanie `/coins/markets` zwraca całe top-100 naraz — nie pasuje do ro
 silnika Twelve Data. Patrz `docs/PRICING_REDESIGN.md` (Faza 1).
 - `asset_definitions` z `api_source='coingecko'`; **`api_symbol` = coingecko `id`**
   (`bitcoin`, `ethereum`, …), nie ticker. Mapowanie `coin.id → api_symbol → asset_id → price_cache`.
-- Polityka alertów inna niż `fetch-metals` (cykl co 5 min): mail **tylko** przy totalnej
-  porażce (0 cen); brak pojedynczego coina w top-100 → tylko `cron_logs.warnings`, bez maila.
-- Sekret `COINGECKO_API_KEY` (demo plan, nagłówek `x-cg-demo-api-key`) — opcjonalny.
+- **Polityka alertów:** bez płatnego klucza jedziemy na **publicznym limicie** CoinGecko z dzielonego
+  IP → sporadyczny **429 jest transient**. Mail leci dopiero gdy padło **3 runy Z RZĘDU**
+  (`ALERT_AFTER_FAILS`, liczone z `cron_logs` — bez nowej tabeli); pojedynczy 429 → cisza, następny
+  run pobiera. Brak pojedynczego coina w top-100 → tylko `cron_logs.warnings`, bez maila.
+- Sekret `COINGECKO_API_KEY` (demo plan) **opcjonalny i obecnie nieużywany** (płatny) — stąd public tier.
 
 ### `fetch-eod` (co godzinę) — źródło docelowe akcji/ETF/FX
 Akcje/ETF/FX z **EODHD** (zastępuje Twelve Data). Standalone, bo model jest inny niż rotacja TD:
@@ -535,6 +541,9 @@ dane **EOD** (raz dziennie), pobierane **bulkiem per giełda**. Patrz `docs/PRIC
 - **Model błędów** (cron co godzinę, pełny run): **FX bez kursu CAŁY dzień → mail**; **trzymany ticker
   bez ceny CAŁY dzień → mail**; transient (jeden run) → cicho, następny run ponawia. „Cały dzień"
   wykrywane z `price_cache.updated_at` (audyt w runie o 23:00 UTC).
+- **Jeden zbiorczy mail, nie per-asset:** audyt o 23:00 zbiera wszystkie nieświeże naraz i wysyła
+  **jeden** `sendAlertEmail` z listą (osobna sekcja FX, osobna tickery). 100 zepsutych = 1 mail ze 100
+  pozycjami, max raz dziennie. Pojedyncza giełda z błędem requestu w danym runie → `cron_logs.warnings`.
 - Sekret `EODHD_API_KEY`. **Rewers do TD**: patrz migracja `..._eodhd_cutover.sql` (blok ROLLBACK).
 
 ### `snapshot-portfolio` (codziennie, 7:00 UTC)
