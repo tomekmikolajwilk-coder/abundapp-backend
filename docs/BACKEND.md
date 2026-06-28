@@ -302,15 +302,30 @@ niosą własną nazwę i cenę w wierszu `holdings`.
 
 ## 5. Zewnętrzne API kursów
 
-| API | Limit (free) | Pokrycie | Cron |
-|-----|--------------|----------|------|
-| **Twelve Data** | 8 credits/min, 800/dobę | krypto, akcje, ETF-y (US), forex | co 15 min |
-| **Metals.Dev** | **100 req/miesiąc** | metale (XAU, XAG, XPT, XPD) | co 2 dni |
+Po Fazie 4 każda klasa aktywów ma **dedykowane źródło** (provider-agnostyczny model — patrz §7):
 
-- Endpoint Twelve Data: `GET /price?symbol=A,B,C&apikey=…` (do 8 symboli po przecinku).
-- Endpoint Metals.Dev: `GET /v1/metal/spot?metal=gold&currency=USD&api_key=…` (per metal).
-- **Uwaga:** Metals.Dev z limitem 100/mies. NIE może jechać w 15-min rotacji — stąd osobny
-  wolny cron i osobna funkcja `fetch-metals`.
+| Źródło | Klasy | Pokrycie | Funkcja / cron |
+|--------|-------|----------|----------------|
+| **EODHD** | akcje, ETF, **FX** | US + EU (DE/FR/NL/UK/CH) + PL; bulk EOD per giełda | `fetch-eod`, co godzinę |
+| **CoinGecko** | krypto | top-100 (bulk, 1 call `/coins/markets`) | `fetch-crypto`, co 15 min |
+| **Metals.Dev** | metale | XAU, XAG, XPT, XPD (limit **100 req/mies.**) | `fetch-metals`, co 2 dni |
+| **Twelve Data** | — | **uśpione** po cutoverze (Faza 4); kod + `api_symbol` zostają pod revert SQL-em | — |
+
+### Pokrycie EODHD (akcje/ETF/FX) — stan
+- **Live (pobierane):** giełdy w `SUPPORTED_EODHD_EXCHANGES` (`_shared/eodhd.ts`) = **US, WAR, XETRA,
+  PA, AS, LSE, SW**. Cena natywna → USD przez kurs FX (te same waluty w katalogu).
+- **Gotowe, ale WYŁĄCZONE:** Azja (HK/KO/TW/Chiny) — architektura ready; brakuje tylko walut FX
+  (HKD/KRW/TWD/CNY) w katalogu. Włączenie = +4 waluty + wpis w `EXCHANGE_MAP`/`SUPPORTED_EODHD_EXCHANGES`.
+- **Poza zasięgiem planu:** **Japonia** (Tokio/JPX) i **Indie** (NSE/BSE) — drogie licencje, brak na tym tierze.
+- **Długi ogon** (dowolna spółka/ETF z obsługiwanej giełdy) dochodzi na żądanie: `/assets/discover` + `/assets/request`.
+
+### Endpointy EODHD
+- `eod-bulk-last-day/{EXCHANGE}` — 1 call = cały EOD giełdy (US z filtrem `symbols=`; nie-US pełny dump + filtr w kodzie).
+- `real-time/{CCY}USD.FOREX` — kurs waluty (FX), `close` = kurs wprost.
+- `search/{q}` — wyszukiwarka do `/assets/discover` (request-asset).
+- `api_symbol` **nie jest czytany** — symbol/giełda wyprowadzane z metadanych (`exchange`/`country`), `asset_id` US=bare / nie-US=`CODE.EXCHANGE`.
+
+**Uwaga:** Metals.Dev (100/mies.) i CoinGecko (bulk) NIE pasują do rotacji — stąd własne funkcje.
 
 ---
 
@@ -607,15 +622,17 @@ Kształt błędu: `{ "error": "opis" }`. Funkcje cron zwracają na błędzie `{ 
 
 ## 13. Koszty — płatne API, biblioteki i plany
 
-Stan na **2026-06-14**. Wszystko obecnie **w ramach darmowych tierów / licencji — zero realnych kosztów**.
-Kwoty orientacyjne; przed upgradem sprawdź aktualny cennik dostawcy.
+Stan na **2026-06-28**. Po Fazie 4 jedyny realny koszt backendu to **EODHD (płatny)** — reszta
+w ramach darmowych tierów. Kwoty orientacyjne; przed upgradem sprawdź aktualny cennik dostawcy.
 
 ### Usługi (API, hosting, mail)
 
 | Usługa | Do czego | Plan teraz | Zużycie / limit dziś | Warunki przejścia na wyższy plan |
 |--------|----------|-----------|----------------------|----------------------------------|
 | **Supabase** | baza, auth, Edge Functions, cron | Free | DB ~500 MB, ~500 tys. wywołań funkcji/mies.; projekt **pauzuje po 7 dniach bezczynności** | **Pro ~$25/mies.** — produkcja (brak pauzowania), backupy, przekroczenie DB/transferu/wywołań |
-| **Twelve Data** | krypto, akcje, ETF, forex | Free | 8 credits/min, 800/dobę, **tylko rynki US**; zużycie 8×96 = **768/800** | **płatny od ~$29/mies.** — giełdy EU (XETRA/LSE → VWCE/IWDA/CSPX/AGGH), więcej assetów, próg 800/dobę lub rate limit 8/min |
+| **EODHD** | **akcje, ETF, FX** (US+EU+PL, docelowe) | **Płatny** (token All-World; ~od $20/mies. wg researchu, faktyczny plan = Twój) | 100k call/dobę — używamy kilkanaście (bulk per giełda + FX) | Real-time EU zamiast delayed, Azja/JP/IN = osobne add-ony (drogie licencje) |
+| **CoinGecko** | krypto (top-100) | Free (publiczny, bez klucza) | 1 bulk-call co 15 min; sporadyczny 429 z dzielonego IP (tolerowany) | **demo key (płatny)** — wyższy limit, koniec 429; lub własny IP |
+| **Twelve Data** | — (**uśpione**, kod pod revert) | Free | 0 — TD nie jest już wołany po cutoverze na EODHD | n/d — gdyby wracać do TD: free 800/dobę tylko US |
 | **Metals.Dev** | metale (XAU, XAG, XPT, XPD) | Free | **100 req/miesiąc**; zużycie 4 metale co 2 dni ≈ **60/100** | płatny — więcej metali, częstszy cron lub dobicie do 100/mies. |
 | **Resend** | alerty mailowe przy awariach cronów | Free | 100 maili/dobę, 3000/mies., 1 domena (nadawca `onboarding@resend.dev`) | **~$20/mies.** — własna domena nadawcza, większy wolumen |
 
