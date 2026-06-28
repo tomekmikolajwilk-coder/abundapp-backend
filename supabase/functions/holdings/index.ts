@@ -3,6 +3,7 @@ import { badRequest, json, notFound, serverError, serviceUnavailable } from "../
 import { resolveUserId } from "../_shared/auth.ts";
 import { execPriceUsd, recordTransaction } from "../_shared/transactions.ts";
 import { getProvider } from "../_shared/price_providers/index.ts";
+import { eodhdBulkCode, EODHD_BASE, EXCHANGE_MAP } from "../_shared/eodhd.ts";
 
 // Dodawanie / edycja / usuwanie pozycji portfela. user_id z JWT (claim `sub`).
 //
@@ -88,23 +89,79 @@ async function fetchPriceOnDemand(
   }
 }
 
+// On-demand single-fetch z EODHD (paid tier — bez limitu). Źródła eodhd (akcje/ETF świata) NIE są
+// providerem rotacji (symbol wyprowadzany z `exchange`, nie z api_symbol), więc on-demand robimy tu
+// osobno. Real-time `close` jest w walucie notowania → przeliczamy na USD kursem z price_cache.
+async function fetchEodhdPriceUsd(
+  supabase: Supa,
+  assetId: string,
+  exchange: string | null,
+): Promise<number | null> {
+  const apiKey = Deno.env.get("EODHD_API_KEY");
+  const m = EXCHANGE_MAP[exchange ?? ""];
+  if (!apiKey || !m) return null;
+  const symbol = `${eodhdBulkCode(assetId)}.${m.eodhd}`;
+  try {
+    const res = await fetch(`${EODHD_BASE}/real-time/${symbol}?api_token=${apiKey}&fmt=json`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const close = typeof data.close === "number" ? data.close : Number(data.close);
+    if (!Number.isFinite(close)) return null;
+    const quote = close / (m.pence ? 100 : 1); // LSE kwotuje w pensach → na funty
+
+    // FX: waluta notowania → USD (price_cache: USD za 1 jednostkę waluty; USD=1).
+    let fx: number;
+    if (m.ccy === "USD") {
+      fx = 1;
+    } else {
+      const { data: px } = await supabase.from("price_cache").select("price_usd").eq("asset_id", m.ccy).single();
+      if (!px) return null;
+      fx = px.price_usd as number;
+    }
+
+    const priceUsd = quote * fx;
+    await supabase.from("price_cache").upsert(
+      { asset_id: assetId, price_usd: priceUsd, updated_at: new Date().toISOString() },
+      { onConflict: "asset_id" },
+    );
+    console.log(`[holdings] on-demand eodhd: ${assetId} (${symbol}) = ${priceUsd}`);
+    return priceUsd;
+  } catch (err) {
+    console.warn(`[holdings] on-demand eodhd ${assetId} nieudany: ${String(err)}`);
+    return null;
+  }
+}
+
 // Add-time guard ceny dla pozycji market. Zwraca wycenę (jeśli znana) oraz, gdy blokujemy,
 // czy powód jest przejściowy (`transient`) — od tego zależy czy front pokaże „spróbuj ponownie".
 //   - cache ma kurs            → { price, blocked:false }
-//   - brak + provider rotacji  → on-demand; sukces → cena; brak → blocked (+ transient gdy czkawka)
-//   - brak + brak providera    → { price:null, blocked:false } (crypto/metal: własny cron dosypie cenę)
+//   - twelve_data (provider)   → on-demand; sukces → cena; brak → blocked (+ transient gdy czkawka)
+//   - eodhd                    → on-demand single-fetch; sukces → cena; brak → blocked transient
+//   - crypto/metal             → { price:null, blocked:false } (własny cron dosypie wkrótce; zwykle już w cache)
 async function resolveMarketPrice(
   supabase: Supa,
   assetId: string,
   apiSource: string,
   apiSymbol: string,
+  exchange: string | null,
 ): Promise<{ price: number | null; blocked: boolean; transient: boolean }> {
   const cached = await execPriceUsd(supabase, { price_source: "market", asset_id: assetId, unit_value: null, currency: null });
   if (cached != null) return { price: cached, blocked: false, transient: false };
-  if (!getProvider(apiSource)) return { price: null, blocked: false, transient: false };
-  const { price, transient } = await fetchPriceOnDemand(supabase, assetId, apiSource, apiSymbol);
-  if (price != null) return { price, blocked: false, transient: false };
-  return { price: null, blocked: true, transient };
+
+  if (getProvider(apiSource)) {
+    const { price, transient } = await fetchPriceOnDemand(supabase, assetId, apiSource, apiSymbol);
+    if (price != null) return { price, blocked: false, transient: false };
+    return { price: null, blocked: true, transient };
+  }
+
+  // eodhd: standalone-cron, ale dajemy cenę od razu (user nie ma wisieć z wartością 0 i bez wpisu w ledgerze).
+  if (apiSource === "eodhd") {
+    const price = await fetchEodhdPriceUsd(supabase, assetId, exchange);
+    if (price != null) return { price, blocked: false, transient: false };
+    return { price: null, blocked: true, transient: true }; // porażka → „spróbuj ponownie"
+  }
+
+  return { price: null, blocked: false, transient: false };
 }
 
 async function createHolding(supabase: Supa, userId: string, req: Request): Promise<Response> {
@@ -120,7 +177,7 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
     if (typeof asset_id !== "string") return badRequest("market: wymagany asset_id");
 
     const { data: def, error } = await supabase
-      .from("asset_definitions").select("category, api_source, api_symbol")
+      .from("asset_definitions").select("category, api_source, api_symbol, exchange")
       .eq("asset_id", asset_id).eq("active", true).single();
     if (error || !def) return badRequest(`Nieznany lub nieaktywny asset ${asset_id}`);
     if (def.category !== category) {
@@ -129,7 +186,8 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
 
     // Add-time guard: wyceniamy PRZED insertem — pozycja bez kursu nie wchodzi do portfela.
     // Rozróżniamy: czkawka źródła (503, „spróbuj ponownie") vs trwały brak notowań (400, „wybierz inne").
-    const { price, blocked, transient } = await resolveMarketPrice(supabase, asset_id, def.api_source as string, def.api_symbol as string);
+    const { price, blocked, transient } = await resolveMarketPrice(
+      supabase, asset_id, def.api_source as string, def.api_symbol as string, def.exchange as string | null);
     if (blocked) {
       return transient
         ? serviceUnavailable(`Chwilowy problem z pobraniem kursu dla ${asset_id} — spróbuj ponownie za chwilę.`)
