@@ -7,10 +7,10 @@ import type { PriceRow } from "../_shared/types.ts";
 // rotacyjnego silnika fetch-prices (budżet Twelve Data / batch po 8). Tu jedno żądanie
 // /coins/markets pobiera całe top-100 naraz, mapujemy po coingecko `id` (api_symbol).
 //
-// Polityka alertów dostosowana do cyklu co 5 min (≠ fetch-metals co 2 dni):
-//   - totalna porażka (0 cen) → mail od razu,
-//   - braki pojedynczych coinów (def poza top-100) → tylko warnings w cron_logs, BEZ maila
-//     (przy 288 runach/dobę mail per-coin byłby spamem).
+// Cron co 15 min. Bez klucza (płatny) jedziemy na publicznym limicie CoinGecko z dzielonego
+// IP Edge Functions → sporadyczny 429 jest transient. Polityka alertów:
+//   - awaria/0 cen → mail dopiero po ALERT_AFTER_FAILS runach Z RZĘDU (pojedynczy 429 = cisza),
+//   - braki pojedynczych coinów (def poza top-100) → tylko warnings w cron_logs, BEZ maila.
 
 type CryptoDef = { asset_id: string; api_symbol: string };
 
@@ -66,6 +66,21 @@ async function fetchCoinGecko(
   return { rows, missing };
 }
 
+const ALERT_AFTER_FAILS = 3; // mail dopiero gdy tyle runów Z RZĘDU padło (transient się sam załata)
+
+// Czy bieżąca porażka to już ALERT_AFTER_FAILS-ta z rzędu? Liczymy z cron_logs (wpis bieżącej
+// porażki musi być JUŻ zapisany przed wywołaniem). Bez klucza CoinGecko jedzie na publicznym
+// limicie z dzielonego IP → pojedynczy 429 jest normalny i transient → nie mailujemy od razu.
+async function shouldAlert(supabase: Supa): Promise<boolean> {
+  const { data } = await supabase
+    .from("cron_logs").select("success")
+    .eq("function_name", "fetch-crypto")
+    .order("ran_at", { ascending: false })
+    .limit(ALERT_AFTER_FAILS);
+  const recent = data ?? [];
+  return recent.length >= ALERT_AFTER_FAILS && recent.every((r) => r.success === false);
+}
+
 Deno.serve(async () => {
   console.log("=== fetch-crypto START ===");
   const supabase = getServiceClient();
@@ -89,11 +104,11 @@ Deno.serve(async () => {
     const warningsText = missing.length > 0 ? `Brak w top-100:\n${missing.join("\n")}` : null;
 
     if (rows.length === 0) {
-      // Żaden zdefiniowany coin nie znalazł się w odpowiedzi — to anomalia, mail od razu.
-      await Promise.all([
-        writeCronLog(supabase, "fetch-crypto", { success: false, itemsProcessed: 0, errorMessage: "Nie pobrano żadnego kursu krypto", warnings: warningsText }),
-        sendAlertEmail("❌ abundapp: błąd fetch-crypto (0 kursów)", warningsText ?? "—"),
-      ]);
+      // Żaden coin się nie pobrał — log od razu, ale mail dopiero gdy to N-ty pusty run z rzędu.
+      await writeCronLog(supabase, "fetch-crypto", { success: false, itemsProcessed: 0, errorMessage: "Nie pobrano żadnego kursu krypto", warnings: warningsText });
+      if (await shouldAlert(supabase)) {
+        await sendAlertEmail("❌ abundapp: fetch-crypto — 0 kursów przez kilka runów z rzędu", warningsText ?? "—");
+      }
     } else {
       // Sukces (z ew. brakami pojedynczych coinów — tylko log, bez maila przez cykl co 5 min).
       await writeCronLog(supabase, "fetch-crypto", { success: true, itemsProcessed: rows.length, errorMessage: null, warnings: warningsText });
@@ -104,10 +119,11 @@ Deno.serve(async () => {
   } catch (err) {
     const errorMsg = String(err);
     console.error(`[ERROR] ${errorMsg}`);
-    await Promise.all([
-      writeCronLog(supabase, "fetch-crypto", { success: false, itemsProcessed: null, errorMessage: errorMsg, warnings: null }),
-      sendAlertEmail("❌ abundapp: błąd fetch-crypto", errorMsg),
-    ]);
+    // Log od razu; mail dopiero gdy padło N runów z rzędu (pojedynczy 429 z CoinGecko = transient).
+    await writeCronLog(supabase, "fetch-crypto", { success: false, itemsProcessed: null, errorMessage: errorMsg, warnings: null });
+    if (await shouldAlert(supabase)) {
+      await sendAlertEmail("❌ abundapp: fetch-crypto — błąd przez kilka runów z rzędu", errorMsg);
+    }
     console.log("=== fetch-crypto FAILED ===");
     return json({ success: false, error: errorMsg }, 500);
   }
