@@ -109,44 +109,68 @@ async function handleSearch(supabase: Supa, url: URL): Promise<Response> {
 
   const rows = data ?? [];
   const hasMore = rows.length > limit;
-  const results = hasMore ? rows.slice(0, limit) : rows;
+  const local = (hasMore ? rows.slice(0, limit) : rows).map((r) => ({ ...r, in_catalog: true }));
 
-  console.log(`[assets/search] q="${q}" cat=${category ?? "-"} exch=${exchange ?? "-"} → ${results.length} (more=${hasMore})`);
+  // Fold-in EODHD: gdy ?include_eodhd=true, doklejamy kandydatów z EODHD spoza katalogu
+  // (np. UEC) — user szuka po WSZYSTKIM, co EODHD wspiera, nie tylko po naszym seedzie.
+  // Tylko 1. strona (offset=0) — paginacja dotyczy katalogu lokalnego; EODHD to dogrywka.
+  const results: Record<string, unknown>[] = [...local];
+  const includeEodhd = url.searchParams.get("include_eodhd") === "true";
+  if (includeEodhd && offset === 0 && q.length >= 2) {
+    const apiKey = Deno.env.get("EODHD_API_KEY");
+    if (apiKey) {
+      try {
+        const localIds = new Set(local.map((r) => r.asset_id as string));
+        for (const c of await eodhdCandidates(apiKey, q)) {
+          if (!localIds.has(c.asset_id)) results.push({ ...c, country: null, in_catalog: false });
+        }
+      } catch (err) {
+        console.warn(`[assets/search] EODHD fold-in nieudany (zwracam tylko lokalne): ${String(err)}`);
+      }
+    }
+  }
+
+  console.log(`[assets/search] q="${q}" cat=${category ?? "-"} exch=${exchange ?? "-"} eodhd=${includeEodhd} → ${results.length} (more=${hasMore})`);
   return json({ results, limit, offset, has_more: hasMore });
 }
 
+// Kandydaci z EODHD (akcje/ETF z obsługiwanych giełd), znormalizowani do kształtu wyniku.
+// Wspólne dla /discover i fold-inu w /search. Nie sprawdza katalogu — to robi wołający.
+type EodhdCandidate = { asset_id: string; code: string; exchange: string; display_name: string; category: "stock" | "etf"; currency: string | null };
+async function eodhdCandidates(apiKey: string, q: string): Promise<EodhdCandidate[]> {
+  const hits = await eodhdSearch(apiKey, q);
+  // Tylko obsługiwane giełdy (mamy FX) + typy stock/etf. Odrzuca cross-listingi z egzotyk,
+  // tokenizowane (CC), lewarowane spoza naszych giełd itd.
+  return hits
+    .filter((h) => SUPPORTED_EODHD_EXCHANGES.has(h.Exchange) && eodhdTypeToCategory(h.Type) !== null)
+    .map((h) => ({
+      asset_id: eodhdAssetId(h.Code, h.Exchange),
+      code: h.Code,
+      exchange: h.Exchange,
+      display_name: h.Name,
+      category: eodhdTypeToCategory(h.Type)!,
+      currency: h.Currency ?? null,
+    }));
+}
+
 // ── GET /assets/discover?q= — szukaj w EODHD tego, czego nie ma w katalogu ─────
-// Zwraca kandydatów (akcje/ETF z obsługiwanych giełd) z flagą in_catalog. Front pokazuje
-// listę „nie znalazłeś? oto co jest w EODHD" → user wybiera → POST /assets/request.
+// Zwraca kandydatów (akcje/ETF z obsługiwanych giełd) z flagą in_catalog. Osobny endpoint
+// na wypadek czystego „discover"; w pickerze prościej użyć /search?include_eodhd=true (jeden call).
 async function handleDiscover(supabase: Supa, url: URL): Promise<Response> {
   const q = (url.searchParams.get("q") ?? "").trim();
   if (q.length < 2) return badRequest("discover: wymagane q (≥2 znaki)");
   const apiKey = Deno.env.get("EODHD_API_KEY");
   if (!apiKey) return serverError("Brak EODHD_API_KEY");
 
-  const hits = await eodhdSearch(apiKey, q);
-  // Tylko obsługiwane giełdy (mamy FX) + typy stock/etf. Odrzuca cross-listingi z egzotyk,
-  // tokenizowane (CC), lewarowane spoza naszych giełd itd.
-  const candidates = hits
-    .filter((h) => SUPPORTED_EODHD_EXCHANGES.has(h.Exchange) && eodhdTypeToCategory(h.Type) !== null)
-    .map((h) => ({ hit: h, assetId: eodhdAssetId(h.Code, h.Exchange), category: eodhdTypeToCategory(h.Type)! }));
-
-  const ids = [...new Set(candidates.map((c) => c.assetId))];
+  const candidates = await eodhdCandidates(apiKey, q);
+  const ids = [...new Set(candidates.map((c) => c.asset_id))];
   const have = new Set<string>();
   if (ids.length > 0) {
     const { data } = await supabase.from("asset_definitions").select("asset_id").in("asset_id", ids);
     for (const r of data ?? []) have.add(r.asset_id as string);
   }
 
-  const results = candidates.map((c) => ({
-    asset_id: c.assetId,
-    code: c.hit.Code,
-    exchange: c.hit.Exchange,
-    display_name: c.hit.Name,
-    category: c.category,
-    currency: c.hit.Currency ?? null,
-    in_catalog: have.has(c.assetId),
-  }));
+  const results = candidates.map((c) => ({ ...c, in_catalog: have.has(c.asset_id) }));
   console.log(`[assets/discover] q="${q}" → ${results.length} kandydatów`);
   return json({ query: q, results });
 }

@@ -351,9 +351,13 @@ używa `/assets/search` — `/assets` ich nie zwraca w całości (zwraca tylko t
 ### `GET /assets/search`
 Paginowany search po katalogu (picker search-as-you-type, Faza 3). Routuje do tej samej
 funkcji co `/assets`.
-- Parametry: `q` (podłańcuch nazwy/tickera, ≥2 znaki), `category`, `exchange`, `limit` (≤50, dom. 20), `offset`.
+- Parametry: `q` (podłańcuch nazwy/tickera, ≥2 znaki), `category`, `exchange`, `limit` (≤50, dom. 20), `offset`, `include_eodhd`.
 - Wymaga **`q` lub `category`** (inaczej 400 — bez tego zwracałby cały katalog).
 - `q` → trigramowy ILIKE po `display_name` i `asset_id` (indeksy pg_trgm).
+- **`include_eodhd=true`** → po wynikach lokalnych dokleja kandydatów z EODHD spoza katalogu
+  (np. `UEC`), oznaczonych `in_catalog:false` → user szuka po WSZYSTKIM, co EODHD wspiera, jednym
+  callem. Tylko 1. strona (`offset=0`); EODHD-fold-in best-effort (jak padnie → tylko lokalne).
+  Wynik z `in_catalog:true` = dodajesz wprost; `in_catalog:false` = najpierw `POST /assets/request`.
 ```json
 {
   "results": [{ "asset_id": "AAPL", "category": "stock", "display_name": "Apple Inc", "exchange": "NASDAQ", "country": "US" }],
