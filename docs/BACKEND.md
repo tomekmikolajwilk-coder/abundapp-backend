@@ -306,16 +306,16 @@ Po Fazie 4 każda klasa aktywów ma **dedykowane źródło** (provider-agnostycz
 
 | Źródło | Klasy | Pokrycie | Funkcja / cron |
 |--------|-------|----------|----------------|
-| **EODHD** | akcje, ETF, **FX** | US + EU (DE/FR/NL/UK/CH) + PL; bulk EOD per giełda | `fetch-eod`, co godzinę |
+| **EODHD** | akcje, ETF, **FX** | US + EU (DE/FR/NL/UK/CH) + PL + Azja (HK/Korea/Tajwan/Chiny); bulk EOD per giełda | `fetch-eod`, co godzinę |
 | **CoinGecko** | krypto | top-100 (bulk, 1 call `/coins/markets`) | `fetch-crypto`, co 15 min |
 | **Metals.Dev** | metale | XAU, XAG, XPT, XPD (limit **100 req/mies.**) | `fetch-metals`, co 2 dni |
 | **Twelve Data** | — | **uśpione** po cutoverze (Faza 4); kod + `api_symbol` zostają pod revert SQL-em | — |
 
 ### Pokrycie EODHD (akcje/ETF/FX) — stan
-- **Live (pobierane):** giełdy w `SUPPORTED_EODHD_EXCHANGES` (`_shared/eodhd.ts`) = **US, WAR, XETRA,
-  PA, AS, LSE, SW**. Cena natywna → USD przez kurs FX (te same waluty w katalogu).
-- **Gotowe, ale WYŁĄCZONE:** Azja (HK/KO/TW/Chiny) — architektura ready; brakuje tylko walut FX
-  (HKD/KRW/TWD/CNY) w katalogu. Włączenie = +4 waluty + wpis w `EXCHANGE_MAP`/`SUPPORTED_EODHD_EXCHANGES`.
+- **Live (pobierane):** giełdy w `SUPPORTED_EODHD_EXCHANGES` (`_shared/eodhd.ts`):
+  - **US + Europa**: US, WAR (PL), XETRA (DE), PA/AS (Euronext FR/NL), LSE (UK, pensy), SW (CH).
+  - **Azja**: HK (Hongkong), KO/KQ (Korea), TW/TWO (Tajwan), SHG/SHE (Chiny).
+  - Cena natywna → USD przez kurs FX (waluty EUR/GBP/CHF/PLN + HKD/KRW/TWD/CNY w katalogu).
 - **Poza zasięgiem planu:** **Japonia** (Tokio/JPX) i **Indie** (NSE/BSE) — drogie licencje, brak na tym tierze.
 - **Długi ogon** (dowolna spółka/ETF z obsługiwanej giełdy) dochodzi na żądanie: `/assets/discover` + `/assets/request`.
 
@@ -630,7 +630,7 @@ w ramach darmowych tierów. Kwoty orientacyjne; przed upgradem sprawdź aktualny
 | Usługa | Do czego | Plan teraz | Zużycie / limit dziś | Warunki przejścia na wyższy plan |
 |--------|----------|-----------|----------------------|----------------------------------|
 | **Supabase** | baza, auth, Edge Functions, cron | Free | DB ~500 MB, ~500 tys. wywołań funkcji/mies.; projekt **pauzuje po 7 dniach bezczynności** | **Pro ~$25/mies.** — produkcja (brak pauzowania), backupy, przekroczenie DB/transferu/wywołań |
-| **EODHD** | **akcje, ETF, FX** (US+EU+PL, docelowe) | **Płatny** (token All-World; ~od $20/mies. wg researchu, faktyczny plan = Twój) | 100k call/dobę — używamy kilkanaście (bulk per giełda + FX) | Real-time EU zamiast delayed, Azja/JP/IN = osobne add-ony (drogie licencje) |
+| **EODHD** | **akcje, ETF, FX** (US+EU+PL+Azja) | **Płatny** (token All-World; ~od $20/mies. wg researchu, faktyczny plan = Twój) | 100k call/dobę — używamy kilkanaście (bulk per giełda + FX) | Real-time EU zamiast delayed; JP/IN = osobne add-ony (drogie licencje) |
 | **CoinGecko** | krypto (top-100) | Free (publiczny, bez klucza) | 1 bulk-call co 15 min; sporadyczny 429 z dzielonego IP (tolerowany) | **demo key (płatny)** — wyższy limit, koniec 429; lub własny IP |
 | **Twelve Data** | — (**uśpione**, kod pod revert) | Free | 0 — TD nie jest już wołany po cutoverze na EODHD | n/d — gdyby wracać do TD: free 800/dobę tylko US |
 | **Metals.Dev** | metale (XAU, XAG, XPT, XPD) | Free | **100 req/miesiąc**; zużycie 4 metale co 2 dni ≈ **60/100** | płatny — więcej metali, częstszy cron lub dobicie do 100/mies. |

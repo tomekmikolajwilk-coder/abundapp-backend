@@ -17,11 +17,22 @@ export const EXCHANGE_MAP: Record<string, { eodhd: string; ccy: string; pence?: 
   AS: { eodhd: "AS", ccy: "EUR" },
   LSE: { eodhd: "LSE", ccy: "GBP", pence: true },
   SW: { eodhd: "SW", ccy: "CHF" },
+  // Azja — waluty FX dodane w migracji asia_fx (HKD/KRW/TWD/CNY).
+  HK: { eodhd: "HK", ccy: "HKD" },
+  KO: { eodhd: "KO", ccy: "KRW" },
+  KQ: { eodhd: "KQ", ccy: "KRW" },
+  TW: { eodhd: "TW", ccy: "TWD" },
+  TWO: { eodhd: "TWO", ccy: "TWD" },
+  SHG: { eodhd: "SHG", ccy: "CNY" },
+  SHE: { eodhd: "SHE", ccy: "CNY" },
 };
 
 // Giełdy, które realnie umiemy wycenić (mamy dla nich kurs FX). Tylko z tych dopuszczamy
-// /discover i /request. Azja (HKD/KRW/TWD/CNY) dojdzie, gdy doseedujemy te waluty.
-export const SUPPORTED_EODHD_EXCHANGES = new Set(["US", "WAR", "XETRA", "PA", "AS", "LSE", "SW"]);
+// /discover i /request. (JP/IN poza — EODHD nie ma ich giełd na tym planie.)
+export const SUPPORTED_EODHD_EXCHANGES = new Set([
+  "US", "WAR", "XETRA", "PA", "AS", "LSE", "SW", // US + Europa
+  "HK", "KO", "KQ", "TW", "TWO", "SHG", "SHE", // Azja (Chiny/HK, Korea, Tajwan)
+]);
 
 // EODHD Type → nasza kategoria. Tylko realnie trzymane klasy; resztę (FUND, Warrant, Preferred…)
 // odrzucamy — to szum dla apki do majątku.
