@@ -136,18 +136,30 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
         : badRequest(`Brak notowań dla ${asset_id} — nie można dodać pozycji (źródło ceny nie zwraca kursu).`);
     }
 
-    const { data, error: insErr } = await supabase.from("holdings").insert({
-      user_id: userId,
-      price_source: "market",
-      category: def.category,
-      asset_id,
-      amount,
-      display_category: typeof display_category === "string" ? display_category : null,
-    }).select().single();
-    if (insErr) return serverError(insErr.message);
+    // Merge: jedna pozycja market na (user, asset_id) — dodanie już trzymanego assetu
+    // INKREMENTUJE ilość zamiast tworzyć duplikat (#7). Transakcja i tak buy na DODANĄ ilość.
+    const existing = (await supabase
+      .from("holdings").select("id, amount")
+      .eq("user_id", userId).eq("asset_id", asset_id).eq("price_source", "market")
+      .maybeSingle()).data;
 
-    // Ledger: buy całości po wycenie sprzed insertu. price bywa null tylko dla źródeł bez providera
-    // (crypto/metal chwilowo bez cache) — wtedy pomijamy wpis, dosypie się z własnego cronu.
+    const saved = existing
+      ? await supabase.from("holdings")
+        .update({ amount: Number(existing.amount) + amount })
+        .eq("id", existing.id).select().single()
+      : await supabase.from("holdings").insert({
+        user_id: userId,
+        price_source: "market",
+        category: def.category,
+        asset_id,
+        amount,
+        display_category: typeof display_category === "string" ? display_category : null,
+      }).select().single();
+    if (saved.error) return serverError(saved.error.message);
+    const data = saved.data;
+
+    // Ledger: buy na DODANĄ ilość po wycenie sprzed zapisu. price bywa null tylko dla źródeł bez
+    // providera (crypto/metal chwilowo bez cache) — wtedy pomijamy wpis, dosypie się z własnego cronu.
     if (price != null) {
       await recordTransaction(supabase, {
         userId, holdingId: data.id, assetId: asset_id, name: null,
@@ -156,7 +168,7 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
     } else {
       console.warn(`[holdings] brak kursu dla ${asset_id} — pomijam wpis do ledgera`);
     }
-    return json(data, 201);
+    return json(data, existing ? 200 : 201);
   }
 
   // ── MANUAL — cenę podaje user przez custom.unit_value (w walucie custom.currency) ──

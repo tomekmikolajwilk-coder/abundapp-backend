@@ -67,9 +67,11 @@ Deno.serve(async (req) => {
   const points: Point[] = (snapshots ?? []).map((snap) => {
     const holdings = snap.holdings_breakdown as HoldingEntry[];
 
-    // Filtrujemy po categorii lub konkretnym assecie.
+    // Filtrujemy po categorii lub konkretnym assecie. Klucz aktywa = asset_id (market)
+    // albo id wiersza (manual, asset_id=null) — lustro frontowego `assetId = asset_id ?? id`.
+    // Bez tego wykres pozycji manual (nieruchomości/obligacje) wychodził 0 (#9).
     const filtered = holdings.filter((h) => {
-      if (assetIdParam)  return h.asset_id === assetIdParam;
+      if (assetIdParam)  return (h.asset_id ?? h.id) === assetIdParam;
       if (categoryParam) return h.category === categoryParam;
       return true;
     });
