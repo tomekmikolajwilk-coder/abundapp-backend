@@ -75,10 +75,9 @@ Deno.serve(async (req) => {
   }
 
   // ── LIVE: liczymy na bieżąco z holdings + price_cache + asset_definitions ──
-  const [profileResult, pricesResult, defsResult, holdingsResult] = await Promise.all([
+  const [profileResult, pricesResult, holdingsResult] = await Promise.all([
     supabase.from("profiles").select("preferred_currency").eq("id", userId).single(),
     supabase.from("price_cache").select("asset_id, price_usd"),
-    supabase.from("asset_definitions").select("asset_id, category").eq("active", true),
     supabase.from("holdings").select(HOLDINGS_COLUMNS).eq("user_id", userId),
   ]);
 
@@ -87,6 +86,15 @@ Deno.serve(async (req) => {
   if (holdingsResult.error) return serverError("Failed to fetch holdings");
 
   const { preferred_currency } = profileResult.data;
+
+  // Kategorie pobieramy TYLKO dla assetów z price_cache (zbiór ograniczony: trzymane +
+  // krypto + waluty + metale), nie z całego katalogu — ten po cutoverze EODHD przekracza
+  // domyślny limit 1000 wierszy PostgREST, przez co assety spoza pierwszego tysiąca dostawały
+  // category="unknown". Bez .eq(active) — chcemy kategorię też dla ewentualnie wyłączonych.
+  const priceIds = pricesResult.data.map((p) => p.asset_id as string);
+  const defsResult = await supabase
+    .from("asset_definitions").select("asset_id, category")
+    .in("asset_id", priceIds.length > 0 ? priceIds : ["__none__"]);
 
   // Mapa asset_id → { price_usd, category } (category z asset_definitions — źródła prawdy).
   const priceMap = buildPriceMap(pricesResult.data, defsResult.data ?? []);

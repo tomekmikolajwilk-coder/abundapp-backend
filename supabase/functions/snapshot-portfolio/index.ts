@@ -11,10 +11,9 @@ Deno.serve(async () => {
   const supabase = getServiceClient();
 
   try {
-    const [pricesResult, profilesResult, defsResult, holdingsResult] = await Promise.all([
+    const [pricesResult, profilesResult, holdingsResult] = await Promise.all([
       supabase.from("price_cache").select("asset_id, price_usd"),
       supabase.from("profiles").select("id, preferred_currency"),
-      supabase.from("asset_definitions").select("asset_id, category").eq("active", true),
       supabase.from("holdings").select(`user_id, ${HOLDINGS_COLUMNS}`),
     ]);
 
@@ -27,6 +26,14 @@ Deno.serve(async () => {
     if (holdingsResult.error || !holdingsResult.data) {
       throw new Error(`Failed to fetch holdings: ${holdingsResult.error?.message}`);
     }
+
+    // Kategorie tylko dla assetów z price_cache (zbiór ograniczony), nie z całego katalogu —
+    // po cutoverze EODHD katalog > 1000 wierszy = domyślny limit PostgREST → category="unknown"
+    // dla assetów spoza pierwszego tysiąca.
+    const priceIds = pricesResult.data.map((p) => p.asset_id as string);
+    const defsResult = await supabase
+      .from("asset_definitions").select("asset_id, category")
+      .in("asset_id", priceIds.length > 0 ? priceIds : ["__none__"]);
 
     const profiles = profilesResult.data;
     console.log(`[snapshot] ${profiles.length} users, ${pricesResult.data.length} assets in price_cache`);
