@@ -93,7 +93,7 @@ Deno.serve(async (req) => {
   // category="unknown". Bez .eq(active) — chcemy kategorię też dla ewentualnie wyłączonych.
   const priceIds = pricesResult.data.map((p) => p.asset_id as string);
   const defsResult = await supabase
-    .from("asset_definitions").select("asset_id, category")
+    .from("asset_definitions").select("asset_id, category, display_name")
     .in("asset_id", priceIds.length > 0 ? priceIds : ["__none__"]);
 
   // Mapa asset_id → { price_usd, category } (category z asset_definitions — źródła prawdy).

@@ -54,6 +54,7 @@ export function buildBreakdown(
     let category = row.category;
     let interestRate: number | null = null;
     let interestRatio = 0; // udział odsetek w wartości (obligacje); 0 dla reszty
+    let marketName: string | null = null; // katalogowy display_name dla market (np. "PKN Orlen")
 
     if (row.price_source === "market") {
       const info = priceMap[row.asset_id ?? ""];
@@ -63,6 +64,7 @@ export function buildBreakdown(
       }
       priceUsd = info.price_usd;
       category = info.category; // asset_definitions = źródło prawdy dla kategorii market
+      marketName = info.display_name; // żeby front pokazał nazwę (np. "PKN Orlen"), nie ticker "PKN.WAR"
     } else {
       const fx = fxRate(priceMap, row.currency ?? "");
       if (fx === null) {
@@ -93,7 +95,9 @@ export function buildBreakdown(
       value_usd: valueUsd,
       value_ccy: valueCcy,
       price_source: row.price_source,
-      name: row.price_source === "manual" ? row.name : null,
+      // Nazwa do pokazania: manual = nazwa custom usera; market = katalogowy display_name
+      // (front: displayName = name ?? assetId, więc bez tego market pokazywał ticker PKN.WAR).
+      name: row.price_source === "manual" ? row.name : marketName,
       display_category: row.display_category ?? null,
       interest_rate: interestRate,
       interest_ratio: interestRatio,

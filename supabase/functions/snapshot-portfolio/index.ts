@@ -32,7 +32,7 @@ Deno.serve(async () => {
     // dla assetów spoza pierwszego tysiąca.
     const priceIds = pricesResult.data.map((p) => p.asset_id as string);
     const defsResult = await supabase
-      .from("asset_definitions").select("asset_id, category")
+      .from("asset_definitions").select("asset_id, category, display_name")
       .in("asset_id", priceIds.length > 0 ? priceIds : ["__none__"]);
 
     const profiles = profilesResult.data;
