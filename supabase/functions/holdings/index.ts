@@ -190,8 +190,8 @@ async function createHolding(supabase: Supa, userId: string, req: Request): Prom
       supabase, asset_id, def.api_source as string, def.api_symbol as string, def.exchange as string | null);
     if (blocked) {
       return transient
-        ? serviceUnavailable(`Chwilowy problem z pobraniem kursu dla ${asset_id} — spróbuj ponownie za chwilę.`)
-        : badRequest(`Brak notowań dla ${asset_id} — nie można dodać pozycji (źródło ceny nie zwraca kursu).`);
+        ? serviceUnavailable(`Chwilowy problem z pobraniem kursu dla ${asset_id} — spróbuj ponownie za chwilę.`, "price_transient")
+        : badRequest(`Brak notowań dla ${asset_id} — nie można dodać pozycji (źródło ceny nie zwraca kursu).`, "price_unavailable");
     }
 
     // Merge: jedna pozycja market na (user, asset_id) — dodanie już trzymanego assetu

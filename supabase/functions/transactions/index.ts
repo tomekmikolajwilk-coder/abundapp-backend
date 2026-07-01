@@ -46,11 +46,26 @@ Deno.serve(async (req) => {
       .order("created_at", { ascending: false });
     if (error) return serverError(error.message);
 
+    // Nazwy katalogowe dla pozycji market (ledger trzyma name=null dla market) — żeby lista
+    // pokazywała „PKN Orlen", nie ticker „PKN.WAR". .in() na asset_id z transakcji (zbiór ograniczony).
+    const assetIds = [
+      ...new Set((rows ?? []).map((r) => r.asset_id).filter((a): a is string => !!a)),
+    ];
+    const nameMap: Record<string, string> = {};
+    if (assetIds.length > 0) {
+      const { data: defs } = await supabase
+        .from("asset_definitions").select("asset_id, display_name").in("asset_id", assetIds);
+      for (const d of defs ?? []) {
+        if (d.display_name) nameMap[d.asset_id as string] = d.display_name as string;
+      }
+    }
+
     const transactions = (rows ?? []).map((t) => ({
       id: t.id,
       holding_id: t.holding_id,
       asset_id: t.asset_id,
-      name: t.name,
+      // manual = własna nazwa usera; market = katalogowy display_name (fallback ticker na froncie).
+      name: t.name ?? (t.asset_id ? nameMap[t.asset_id as string] ?? null : null),
       category: t.category,
       side: t.side,
       amount: t.amount,
